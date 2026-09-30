@@ -69,24 +69,31 @@ func TestRouting(t *testing.T) {
 	}()
 	waitListening(t, cfg.Listen)
 
-	client := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "socks5", Host: cfg.Listen})},
-	}
-	resp, err := client.Get(backend.URL)
-	if err != nil {
-		t.Fatalf("不在列表里的目标应当直连成功: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if string(body) != "direct" {
-		t.Fatalf("直连拿到 %q", body)
-	}
-
-	if resp, err := client.Get("http://localhost:" + port + "/"); err == nil {
+	// 同一个端口既是 SOCKS5（代理工具用）也是 HTTP 代理（系统代理用），两条路都要通。
+	for _, scheme := range []string{"socks5", "http"} {
+		client := &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: scheme, Host: cfg.Listen})},
+		}
+		resp, err := client.Get(backend.URL)
+		if err != nil {
+			t.Errorf("%s: 不在列表里的目标应当直连成功: %v", scheme, err)
+			continue
+		}
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		t.Fatalf("列表里的域名应当交给 VPN 端点，VPN 没连上就该失败；实际被直连了，拿到 %q", body)
+		if string(body) != "direct" {
+			t.Errorf("%s: 直连拿到 %q", scheme, body)
+		}
+
+		resp, err = client.Get("http://localhost:" + port + "/")
+		if err == nil {
+			body, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if string(body) == "direct" {
+				t.Errorf("%s: 列表里的域名应当交给 VPN 端点，VPN 没连上就该失败；实际被直连了", scheme)
+			}
+		}
 	}
 
 	rs, err := readStatus(statusPath(cfgPath))
