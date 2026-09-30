@@ -215,10 +215,15 @@ func askChallenge(ch *adapter.OpenConnectAuthChallenge, in *bufio.Reader, creds 
 		}
 		var value string
 		var err error
-		switch field.Kind {
-		case "password":
+		switch {
+		case field.Name == "group_list" && creds.group != "":
+			// 服务器先单独问一轮组，再发一份组、用户名、密码俱全的完整表单。
+			// 前一轮选过的组直接沿用，不再问第二遍。
+			value = creds.group
+			fmt.Printf("%s: %s\n", label, value)
+		case field.Kind == "password":
 			value, err = askSecret(in, label)
-		case "select":
+		case field.Kind == "select":
 			value, err = askChoice(in, label, field.Options, field.Value)
 		default:
 			value, err = ask(in, label, field.Value)

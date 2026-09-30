@@ -78,3 +78,29 @@ func TestAskChallengeRejectsBrowserLogin(t *testing.T) {
 		t.Fatal("要求浏览器登录时应当报错，而不是空着提交")
 	}
 }
+
+// TestAskChallengeReusesGroup 复现真实服务器的两轮表单：第一轮只问组，第二轮发来
+// 组、用户名、密码俱全的完整表单。第一轮选过的组不该再问一遍。
+func TestAskChallengeReusesGroup(t *testing.T) {
+	full := loginForm()
+	groupOnly := &adapter.OpenConnectAuthChallenge{ID: "0", Form: &adapter.OpenConnectAuthForm{
+		Fields: []adapter.OpenConnectAuthFormField{full.Form.Fields[2]},
+	}}
+	full.Form.Fields = []adapter.OpenConnectAuthFormField{full.Form.Fields[2], full.Form.Fields[0], full.Form.Fields[1]}
+
+	in := bufio.NewReader(strings.NewReader("2\nalice\npw\n"))
+	var creds credentials
+	if _, err := askChallenge(groupOnly, in, &creds); err != nil {
+		t.Fatalf("第一轮: %v", err)
+	}
+	values, err := askChallenge(full, in, &creds)
+	if err != nil {
+		t.Fatalf("第二轮: %v", err)
+	}
+	if want := (credentials{"alice", "pw", "student"}); creds != want {
+		t.Errorf("认出的凭据 %+v，想要 %+v", creds, want)
+	}
+	if want := map[string]string{"k-group": "student", "k-user": "alice", "k-pass": "pw"}; !maps.Equal(values, want) {
+		t.Errorf("第二轮提交的表单 %v，想要 %v", values, want)
+	}
+}
