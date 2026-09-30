@@ -1,0 +1,311 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	box "github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/certificate"
+	"github.com/sagernet/sing-box/adapter/endpoint"
+	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/adapter/service"
+	"github.com/sagernet/sing-box/dns"
+	"github.com/sagernet/sing-box/dns/transport/fakeip"
+	"github.com/sagernet/sing-box/dns/transport/local"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/direct"
+	"github.com/sagernet/sing-box/protocol/mixed"
+	"github.com/sagernet/sing-box/protocol/openconnect"
+	"github.com/sagernet/sing-box/protocol/tun"
+	singjson "github.com/sagernet/sing/common/json"
+)
+
+// tun 模式用到的固定地址，都取自 RFC 5737 保留给文档示例的网段：现实网络里不会
+// 出现，也不和常见 TUN 工具重叠（代理工具的假 IP 多用 198.18.0.0/15，组网工具多用
+// 100.64.0.0/10）。要走 VPN 的域名在 tun 模式下被解析成 fakeIPRange 里的地址，
+// 只有这一段被路由进我们的网卡，默认路由和其余路由一概不动。
+const (
+	fakeIPRange = "198.51.100.0/24"
+	fakeIPProbe = "198.51.100.1"
+	tunAddress  = "192.0.2.1/30"
+	tunDNS      = "192.0.2.2"
+)
+
+// endpointOptions 是 VPN 端点的配置。
+func endpointOptions(cfg *Config, password string) map[string]any {
+	return map[string]any{
+		"type": "openconnect",
+		"tag":  "vpn",
+		// 用户态协议栈：隧道里的 IP 包只在进程内流转，不建网卡、不改路由表和系统
+		// DNS，所以不会和机器上已有的 VPN、代理工具冲突。
+		"system":     false,
+		"server":     cfg.Server,
+		"username":   cfg.Username,
+		"password":   password,
+		"auth_group": cfg.Group,
+		// 服务器自己的域名用本机 DNS 解析，不然会想经隧道去查，而隧道还没建起来。
+		"domain_resolver": "local",
+		// 默认重连 300 秒失败就彻底放弃。后台常驻要扛住合盖一整夜，所以放宽到
+		// 一直重试；退避上限是 60 秒，不会频繁打扰服务器。
+		"reconnect_timeout": "87600h",
+	}
+}
+
+// buildOptions 把配置翻译成 sing-box 配置。结果只在内存里，不落盘——里面有密码。
+func buildOptions(cfg *Config, password string, verbose bool) (map[string]any, error) {
+	host, portText, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("监听地址 %q 不对: %w", cfg.Listen, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil, fmt.Errorf("监听端口 %q 不对", portText)
+	}
+	serverHost := cfg.Server
+	if h, _, err := net.SplitHostPort(cfg.Server); err == nil {
+		serverHost = h
+	}
+	level := "warn"
+	if verbose {
+		level = "info"
+	}
+
+	options := map[string]any{
+		"log": map[string]any{"level": level, "timestamp": true},
+		"dns": map[string]any{
+			"servers": []any{
+				map[string]any{"type": "local", "tag": "local"},
+				// 经隧道查询 VPN 服务器推送的 DNS，内网域名只有它认识。
+				map[string]any{"type": "openconnect", "tag": "vpn-dns", "endpoint": "vpn", "accept_default_resolvers": true},
+			},
+			"final": "local",
+		},
+		"endpoints": []any{endpointOptions(cfg, password)},
+		"inbounds": []any{map[string]any{
+			"type":             "mixed",
+			"tag":              "mixed-in",
+			"listen":           host,
+			"listen_port":      port,
+			"set_system_proxy": cfg.Mode == ModeSystem,
+		}},
+		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
+		"route": map[string]any{
+			"rules": []any{
+				// 访问 VPN 服务器本身（比如它的网页门户）走直连，不绕进隧道。
+				map[string]any{"domain": []string{serverHost}, "outbound": "direct"},
+				// 要走 VPN 的域名：先经隧道 DNS 解析成内网地址，再交给 VPN 端点。
+				map[string]any{"domain_suffix": cfg.Domains, "action": "resolve", "server": "vpn-dns", "strategy": "ipv4_only"},
+				map[string]any{"domain_suffix": cfg.Domains, "outbound": "vpn"},
+			},
+			"final":                   "direct",
+			"default_domain_resolver": "local",
+		},
+	}
+	if cfg.Mode == ModeTUN {
+		addTUN(options, cfg)
+	}
+	return options, nil
+}
+
+// addTUN 追加 tun 模式需要的部分：一块只接管假 IP 段的虚拟网卡，以及把要走 VPN
+// 的域名解析成假 IP 的 DNS。系统只会把这些域名的查询发过来，见 tunUp。
+func addTUN(options map[string]any, cfg *Config) {
+	dnsOptions := options["dns"].(map[string]any)
+	dnsOptions["servers"] = append(dnsOptions["servers"].([]any),
+		map[string]any{"type": "fakeip", "tag": "fakeip", "inet4_range": fakeIPRange})
+	dnsOptions["rules"] = []any{
+		// 只发 IPv4 假地址。AAAA 直接回空，免得应用拿到真实 IPv6 地址绕过隧道。
+		map[string]any{"domain_suffix": cfg.Domains, "query_type": []string{"AAAA"}, "action": "predefined", "rcode": "NOERROR"},
+		map[string]any{"domain_suffix": cfg.Domains, "server": "fakeip"},
+	}
+	options["inbounds"] = append(options["inbounds"].([]any), map[string]any{
+		"type":       "tun",
+		"tag":        "tun-in",
+		"address":    []string{tunAddress},
+		"auto_route": true,
+		// 只接管假 IP 段，不碰默认路由。
+		"route_address": []string{fakeIPRange},
+	})
+	route := options["route"].(map[string]any)
+	route["rules"] = append([]any{
+		map[string]any{"inbound": "tun-in", "port": 53, "action": "hijack-dns"},
+	}, route["rules"].([]any)...)
+	// 假 IP 和域名的对应关系存盘，服务重启后应用手里缓存的假 IP 依然有效。
+	options["experimental"] = map[string]any{"cache_file": map[string]any{
+		"enabled":      true,
+		"path":         filepath.Join(configDir(true), "cache.db"),
+		"store_fakeip": true,
+	}}
+}
+
+// newBox 创建 sing-box 实例。只注册用得上的几种协议。
+func newBox(ctx context.Context, options map[string]any) (*box.Box, error) {
+	inbounds := inbound.NewRegistry()
+	mixed.RegisterInbound(inbounds)
+	tun.RegisterInbound(inbounds)
+	outbounds := outbound.NewRegistry()
+	direct.RegisterOutbound(outbounds)
+	endpoints := endpoint.NewRegistry()
+	openconnect.RegisterEndpoint(endpoints)
+	dnsTransports := dns.NewTransportRegistry()
+	local.RegisterTransport(dnsTransports)
+	fakeip.RegisterTransport(dnsTransports)
+	openconnect.RegisterDNSTransport(dnsTransports)
+	ctx = box.Context(ctx, inbounds, outbounds, endpoints, dnsTransports, service.NewRegistry(), certificate.NewRegistry())
+
+	raw, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw)
+	if err != nil {
+		return nil, fmt.Errorf("生成的 sing-box 配置有误: %w", err)
+	}
+	return box.New(box.Options{Context: ctx, Options: parsed})
+}
+
+func vpnEndpoint(instance *box.Box) (adapter.OpenConnectEndpoint, error) {
+	raw, ok := instance.Endpoint().Get("vpn")
+	if !ok {
+		return nil, errors.New("找不到 vpn 端点")
+	}
+	ep, ok := raw.(adapter.OpenConnectEndpoint)
+	if !ok {
+		return nil, errors.New("vpn 端点不是 OpenConnect 端点")
+	}
+	return ep, nil
+}
+
+// runtimeStatus 是后台服务写给 sidedoor status 看的状态，每次隧道状态变化时覆盖。
+type runtimeStatus struct {
+	PID     int       `json:"pid"`
+	State   string    `json:"state"`
+	Message string    `json:"message"`
+	Address []string  `json:"address,omitempty"`
+	Since   time.Time `json:"since,omitzero"`
+	Updated time.Time `json:"updated"`
+}
+
+func statusPath(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), "status.json")
+}
+
+// terminalRetry 是隧道进入不可恢复的错误后，进程主动退出前等待的时间。退出后由
+// launchd 重新拉起，相当于每隔这么久从头重试一次；间隔拉长，免得反复打扰服务器。
+const terminalRetry = 5 * time.Minute
+
+// runEngine 启动 sing-box 并一直跑到 ctx 取消。隧道状态每变一次就记一行日志、
+// 覆盖一次状态文件。
+func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbose bool) error {
+	options, err := buildOptions(cfg, password, verbose)
+	if err != nil {
+		return err
+	}
+	if cfg.Mode == ModeTUN {
+		if err := tunUp(cfg); err != nil {
+			return err
+		}
+		defer tunDown(cfg)
+	}
+	instance, err := newBox(ctx, options)
+	if err != nil {
+		return err
+	}
+	defer instance.Close()
+	if err := instance.Start(); err != nil {
+		return err
+	}
+	ep, err := vpnEndpoint(instance)
+	if err != nil {
+		return err
+	}
+
+	path := statusPath(cfgPath)
+	defer os.Remove(path)
+	log.Printf("已启动：%s 模式，本地代理 %s", cfg.Mode, cfg.Listen)
+	var last string
+	for {
+		// 先取通道再读状态：通道在下一次状态变化时关闭，这样读完之后发生的变化不会漏掉。
+		updated := ep.StatusUpdated()
+		st := ep.OpenConnectStatus()
+		rs := describe(st)
+		if rs.Message != last {
+			log.Print(rs.Message)
+			last = rs.Message
+		}
+		if err := writeStatus(path, rs); err != nil {
+			log.Printf("写状态文件失败: %v", err)
+		}
+		var retry <-chan time.Time
+		if st.State == adapter.OpenConnectStateError {
+			retry = time.After(terminalRetry)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-updated:
+		case <-retry:
+			return fmt.Errorf("隧道出错 %v 仍未恢复：%s", terminalRetry, st.Error)
+		}
+	}
+}
+
+// describe 把 sing-box 的隧道状态翻译成给人看的一句话。
+func describe(st adapter.OpenConnectStatus) runtimeStatus {
+	rs := runtimeStatus{PID: os.Getpid(), State: st.State, Updated: time.Now()}
+	switch st.State {
+	case adapter.OpenConnectStateConnected:
+		if info := st.TunnelInfo; info != nil {
+			for _, p := range info.IPv4 {
+				rs.Address = append(rs.Address, p.Addr().String())
+			}
+			rs.Since = info.ConnectedSince
+		}
+		rs.Message = fmt.Sprintf("隧道已连接，分到的地址 %v", rs.Address)
+	case adapter.OpenConnectStateAuthPending:
+		// 后台没人能回答表单：多半是保存的密码被拒了，或服务器要求额外验证。
+		// 这时只等，不重试，免得拿旧密码反复登录把账号锁掉。
+		rs.Message = "服务器要求重新登录，请运行 sidedoor setup"
+		if ch := st.AuthChallenge; ch != nil && ch.Error != "" {
+			rs.Message = fmt.Sprintf("服务器要求重新登录（%s），请运行 sidedoor setup", ch.Error)
+		}
+	case adapter.OpenConnectStateError:
+		rs.Message = "隧道出错：" + st.Error
+	default:
+		rs.Message = "正在连接"
+		if st.Error != "" {
+			rs.Message = "正在重连，上次的错误：" + st.Error
+		}
+	}
+	return rs
+}
+
+func writeStatus(path string, rs runtimeStatus) error {
+	data, err := json.MarshalIndent(rs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func readStatus(path string) (*runtimeStatus, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rs runtimeStatus
+	if err := json.Unmarshal(data, &rs); err != nil {
+		return nil, err
+	}
+	return &rs, nil
+}

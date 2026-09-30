@@ -1,0 +1,7 @@
+   route to: 198.51.100.1
+destination: 128.0.0.0
+       mask: 128.0.0.0
+  interface: utun7
+      flags: <UP,DONE,CLONING,STATIC>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      4064         0 

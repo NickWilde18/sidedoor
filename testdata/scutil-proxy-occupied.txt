@@ -1,0 +1,21 @@
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 198.18.0.0/15
+    2 : 100.100.100.100.dns
+    3 : 192.168.0.0/16
+    4 : 192.168.1.254.dns
+    5 : localhost
+  }
+  ExcludeSimpleHostnames : 1
+  FTPPassive : 1
+  HTTPEnable : 1
+  HTTPPort : 1082
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 1082
+  HTTPSProxy : 127.0.0.1
+  ProxyAutoConfigEnable : 0
+  ProxyAutoDiscoveryEnable : 0
+  SOCKSEnable : 0
+}
