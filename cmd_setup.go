@@ -60,30 +60,20 @@ func cmdSetup(args []string) error {
 
 	s.next("检查环境")
 	stopped := stopService(prev, path)
+	// 没走到装新服务那一步就失败或者被 Ctrl-C 打断，要把原来的服务恢复回去，
+	// 不然学校的连接就一直断着。
+	restore := func() {
+		if !stopped || replaced.Load() {
+			return
+		}
+		if old, err := newService(prev, path); err == nil && old.Start() == nil {
+			done("setup 没有完成，已恢复原来的后台服务")
+		}
+	}
+	defer restore()
+	defer guardInterrupt(restore)()
 	if stopped {
 		done("停掉了正在运行的 sidedoor 后台服务：腾出端口，也免得服务器上同时挂着两个会话")
-		// 没走到装新服务那一步就失败或者被 Ctrl-C 打断，要把原来的服务恢复回去，
-		// 不然学校的连接就一直断着。
-		restore := func() {
-			if old, err := newService(prev, path); err == nil && old.Start() == nil {
-				fmt.Println()
-				done("setup 没有完成，已恢复原来的后台服务")
-			}
-		}
-		defer func() {
-			if !replaced.Load() {
-				restore()
-			}
-		}()
-		interrupted := make(chan os.Signal, 1)
-		signal.Notify(interrupted, os.Interrupt)
-		defer signal.Stop(interrupted)
-		go func() {
-			if _, ok := <-interrupted; ok && !replaced.Load() {
-				restore()
-				os.Exit(130)
-			}
-		}()
 	}
 	for _, addr := range []string{cfg.Listen, cfg.API} {
 		if err := checkPortFree(addr); err != nil {
@@ -167,6 +157,31 @@ func cmdSetup(args []string) error {
 		fmt.Printf("  %d. %s\n", i+1, line)
 	}
 	return nil
+}
+
+// guardInterrupt 接管 Ctrl-C：恢复终端，做 cleanup，再以 130 退出。返回的函数撤掉接管。
+//
+// 问密码时 ReadPassword 关掉了回显，要等读完才恢复；Ctrl-C 让进程直接退出，它来不及，
+// 之后在这个终端里打字就看不见了。所以接管时先记下终端原来的状态，退出前替它恢复。
+func guardInterrupt(cleanup func()) (stop func()) {
+	fd := int(os.Stdin.Fd())
+	saved, _ := term.GetState(fd) // 不是终端时为 nil
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt)
+	go func() {
+		if _, ok := <-interrupted; ok {
+			if saved != nil {
+				_ = term.Restore(fd, saved)
+			}
+			fmt.Println()
+			cleanup()
+			os.Exit(130)
+		}
+	}()
+	return func() {
+		signal.Stop(interrupted)
+		close(interrupted)
+	}
 }
 
 // nextSteps 按模式给出装好之后该做的事。
@@ -524,5 +539,5 @@ func checkPortFree(listen string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("%s 已被占用（旧的 ocproxy 之类还开着？）: %w", listen, err)
+	return fmt.Errorf("%s 已被占用：可能是另一种模式的 sidedoor 服务还在运行（先用 sidedoor stop 停掉），或者旧的 ocproxy 之类还开着: %w", listen, err)
 }

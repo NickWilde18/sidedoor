@@ -3,6 +3,7 @@ module github.com/NickWilde18/sidedoor
 go 1.27.1
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/dustin/go-humanize v1.1.0
 	github.com/kardianos/service v1.3.0
 	github.com/mattn/go-runewidth v0.0.30
@@ -10,6 +11,7 @@ require (
 	github.com/sagernet/sing-box v1.14.2
 	github.com/sagernet/sing-tun v0.9.6-0.20260924001923-ddaa4ca25e3b
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 )
 
@@ -80,7 +82,6 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
