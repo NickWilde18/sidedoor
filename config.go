@@ -53,10 +53,22 @@ func configDir(root bool) string {
 	return filepath.Join(home, ".config", "sidedoor")
 }
 
-// findConfig 先找当前用户的配置，再找 tun 模式的系统级配置。
+// configCandidates 是查找配置文件的目录，按先后顺序排列。
+//
+// root 只看系统级配置：macOS 的 sudo 会保留 HOME，root 要是也先找 ~/.config/sidedoor，
+// sudo sidedoor uninstall 就会改到、删掉普通模式的配置。普通用户先找自己的，再找
+// 系统级的，这样 status 发现是 tun 模式时能提示加 sudo。
+func configCandidates(root bool) []string {
+	if root {
+		return []string{configDir(true)}
+	}
+	return []string{configDir(false), configDir(true)}
+}
+
+// findConfig 按 configCandidates 的顺序找配置。
 func findConfig() (string, *Config, error) {
-	for _, root := range []bool{false, true} {
-		path := filepath.Join(configDir(root), "config.json")
+	for _, dir := range configCandidates(os.Geteuid() == 0) {
+		path := filepath.Join(dir, "config.json")
 		cfg, err := loadConfig(path)
 		if err == nil {
 			return path, cfg, nil

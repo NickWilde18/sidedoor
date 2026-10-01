@@ -49,3 +49,16 @@ func TestParseDomains(t *testing.T) {
 		t.Errorf("parseDomains = %q，想要 %q", got, want)
 	}
 }
+
+// TestConfigCandidatesForRoot 钉住「sudo 下改到普通用户的配置」：macOS 的 sudo 会保留
+// HOME，root 要是也先找 ~/.config/sidedoor，sudo sidedoor uninstall 就会以 root 身份
+// 删掉普通模式的配置，而不是 tun 模式的。root 只该看系统级配置。
+func TestConfigCandidatesForRoot(t *testing.T) {
+	if got := configCandidates(true); !slices.Equal(got, []string{configDir(true)}) {
+		t.Errorf("root 查找配置的目录 %q，应当只有系统级的 %q", got, configDir(true))
+	}
+	// 普通用户先找自己的，再找系统级的：status 发现是 tun 模式时好提示加 sudo。
+	if got := configCandidates(false); !slices.Equal(got, []string{configDir(false), configDir(true)}) {
+		t.Errorf("普通用户查找配置的目录 %q", got)
+	}
+}
