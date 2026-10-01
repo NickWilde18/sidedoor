@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -439,15 +440,26 @@ func cmdDashboard() error {
 
 	s.next("在浏览器里打开")
 	// tun 模式是 sudo 运行的，不替 root 开浏览器，只把地址给出来。
-	if runtime.GOOS == "darwin" && os.Geteuid() != 0 && exec.Command("open", ui).Run() == nil {
-		done("已在浏览器里打开")
+	if runtime.GOOS == "darwin" && os.Geteuid() != 0 && exec.Command("open", dashboardURL(cfg)).Run() == nil {
+		done("已在浏览器里打开，面板会自动连上 sidedoor")
 	} else {
-		note("请在浏览器里打开 %s", ui)
+		note("请在浏览器里打开 %s", dashboardURL(cfg))
 	}
-	note("第一次打开要填后台地址和密钥：")
-	note("  后台地址  http://%s", cfg.API)
-	note("  密钥      %s", cfg.APISecret)
+	host, port, _ := net.SplitHostPort(cfg.API)
+	note("如果面板还停在「Connect to a backend」，手动填：")
+	note("  Host %s，Port %s，Secret %s", host, port, cfg.APISecret)
+	note("列表里的 127.0.0.1:9090 是面板自带的默认值，连不上，可以删掉。")
 	return nil
+}
+
+// dashboardURL 是在浏览器里打开面板用的地址。
+//
+// 面板自带的默认后台是 127.0.0.1:9090，不告诉它就去连那里。它会读网址里的 hostname、
+// port、secret，把对应的后台加上并选中，随后把这几个参数从地址栏里抹掉。
+func dashboardURL(cfg *Config) string {
+	host, port, _ := net.SplitHostPort(cfg.API)
+	query := url.Values{"hostname": {host}, "port": {port}, "secret": {cfg.APISecret}}
+	return "http://" + cfg.API + "/ui/?" + query.Encode()
 }
 
 // waitHTTP 等到 url 返回 200，最多等 timeout。
