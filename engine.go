@@ -87,6 +87,8 @@ func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[stri
 		"dns": map[string]any{
 			"servers": []any{
 				map[string]any{"type": "local", "tag": "local"},
+				// 系统解析器：直连流量用它，和其他应用的解析结果一致，见 systemDNS。
+				map[string]any{"type": systemDNSType, "tag": "system"},
 				// 经隧道查询 VPN 服务器推送的 DNS，内网域名只有它认识。
 				map[string]any{"type": "openconnect", "tag": "vpn-dns", "endpoint": "vpn", "accept_default_resolvers": true},
 			},
@@ -110,7 +112,7 @@ func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[stri
 				map[string]any{"domain_suffix": cfg.Domains, "outbound": "vpn"},
 			},
 			"final":                   "direct",
-			"default_domain_resolver": "local",
+			"default_domain_resolver": "system",
 		},
 	}
 	// 本地状态接口：sidedoor status 和网页面板从这里看当前每条连接走了哪、传了多少。
@@ -123,18 +125,20 @@ func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[stri
 	}
 	options["experimental"] = map[string]any{"clash_api": api}
 	if cfg.Mode == ModeTUN {
-		addTUN(options, cfg)
+		addTUN(options, cfg, serverHost)
 	}
 	return options, nil
 }
 
 // addTUN 追加 tun 模式需要的部分：一块只接管假 IP 段的虚拟网卡，以及把要走 VPN
 // 的域名解析成假 IP 的 DNS。系统只会把这些域名的查询发过来，见 tunUp。
-func addTUN(options map[string]any, cfg *Config) {
+func addTUN(options map[string]any, cfg *Config, serverHost string) {
 	dnsOptions := options["dns"].(map[string]any)
 	dnsOptions["servers"] = append(dnsOptions["servers"].([]any),
 		map[string]any{"type": "fakeip", "tag": "fakeip", "inet4_range": fakeIPRange})
 	dnsOptions["rules"] = []any{
+		// VPN 服务器自己的名字也在这些后缀下面，要给真实地址：应用得能直接打开它的网页门户。
+		map[string]any{"domain": []string{serverHost}, "server": "local"},
 		// 只发 IPv4 假地址。AAAA 直接回空，免得应用拿到真实 IPv6 地址绕过隧道。
 		map[string]any{"domain_suffix": cfg.Domains, "query_type": []string{"AAAA"}, "action": "predefined", "rcode": "NOERROR"},
 		map[string]any{"domain_suffix": cfg.Domains, "server": "fakeip"},
@@ -150,6 +154,9 @@ func addTUN(options map[string]any, cfg *Config) {
 	route := options["route"].(map[string]any)
 	route["rules"] = append([]any{
 		map[string]any{"inbound": "tun-in", "port": 53, "action": "hijack-dns"},
+		// 直连 VPN 服务器之前，先用 local 解析它的名字：系统解析器会按 /etc/resolver
+		// 把这个名字交回给我们，拿到的是假 IP，连接就绕进自己的网卡里了。
+		map[string]any{"domain": []string{serverHost}, "action": "resolve", "server": "local"},
 	}, route["rules"].([]any)...)
 	// 假 IP 和域名的对应关系存盘，服务重启后应用手里缓存的假 IP 依然有效。
 	options["experimental"].(map[string]any)["cache_file"] = map[string]any{
@@ -171,6 +178,7 @@ func newBox(ctx context.Context, options map[string]any) (*box.Box, error) {
 	dnsTransports := dns.NewTransportRegistry()
 	local.RegisterTransport(dnsTransports)
 	fakeip.RegisterTransport(dnsTransports)
+	registerSystemDNS(dnsTransports)
 	openconnect.RegisterDNSTransport(dnsTransports)
 	ctx = box.Context(ctx, inbounds, outbounds, endpoints, dnsTransports, service.NewRegistry(), certificate.NewRegistry())
 

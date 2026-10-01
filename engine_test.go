@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	mDNS "github.com/miekg/dns"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	M "github.com/sagernet/sing/common/metadata"
@@ -244,5 +245,77 @@ func TestTrimLog(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if len(data) > 30 || !strings.HasPrefix(string(data), "line-") || !strings.HasSuffix(string(data), "line-19\n") {
 		t.Fatalf("超上限后应当只留最后几行整行，实际 %q", data)
+	}
+}
+
+// startFakeDNS 起一个只认 name 一个名字的 DNS 服务器，返回它的地址。
+func startFakeDNS(t *testing.T, name, ip string) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &mDNS.Server{PacketConn: pc, Handler: mDNS.HandlerFunc(func(w mDNS.ResponseWriter, req *mDNS.Msg) {
+		resp := new(mDNS.Msg)
+		resp.SetReply(req)
+		q := req.Question[0]
+		switch {
+		case !strings.EqualFold(q.Name, name):
+			resp.Rcode = mDNS.RcodeNameError
+		case q.Qtype == mDNS.TypeA:
+			resp.Answer = append(resp.Answer, &mDNS.A{
+				Hdr: mDNS.RR_Header{Name: q.Name, Rrtype: mDNS.TypeA, Class: mDNS.ClassINET, Ttl: 60},
+				A:   net.ParseIP(ip),
+			})
+		}
+		_ = w.WriteMsg(resp)
+	})}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = server.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// TestDirectUsesSystemResolver 钉住「经 sidedoor 直连时，只有按域名分流的解析器才认识
+// 的名字解析不出来」：sing-box 自带的 local 在 macOS 上只问默认网卡的那组 DNS，不认
+// Tailscale 的 MagicDNS、别的 VPN 的内网域名、/etc/resolver 里的配置，浏览器经代理访问
+// emberbound.tail5cd230.ts.net 就回 502。直连流量必须交给系统解析器；测试里用一个
+// 只认 only-os.test 的假解析器代替它。
+func TestDirectUsesSystemResolver(t *testing.T) {
+	fake := startFakeDNS(t, "only-os.test.", "127.0.0.1")
+	defer func(r *net.Resolver) { systemResolver = r }(systemResolver)
+	systemResolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "udp", fake)
+	}}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "direct")
+	}))
+	defer backend.Close()
+	_, port, _ := net.SplitHostPort(backend.Listener.Addr().String())
+
+	cfg := testConfig(t, ModeProxy)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runEngine(ctx, cfg, cfgPath, "pw", false) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitListening(t, cfg.Listen)
+
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: cfg.Listen})},
+	}
+	resp, err := client.Get("http://only-os.test:" + port + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != "direct" {
+		t.Fatalf("只有系统解析器认识的名字，经代理直连应当能打开；实际 %s %q", resp.Status, body)
 	}
 }
