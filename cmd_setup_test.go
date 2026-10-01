@@ -58,7 +58,7 @@ func TestAskChallenge(t *testing.T) {
 	}
 	for _, c := range cases {
 		var creds credentials
-		values, err := askChallenge(loginForm(), bufio.NewReader(strings.NewReader(c.input)), &creds)
+		values, err := askChallenge(loginForm(), bufio.NewReader(strings.NewReader(c.input)), &creds, map[string]bool{})
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -74,7 +74,7 @@ func TestAskChallenge(t *testing.T) {
 
 func TestAskChallengeRejectsBrowserLogin(t *testing.T) {
 	ch := &adapter.OpenConnectAuthChallenge{ID: "1", Browser: &adapter.OpenConnectBrowserRequest{URL: "https://sso.example.edu/"}}
-	if _, err := askChallenge(ch, bufio.NewReader(strings.NewReader("")), &credentials{}); err == nil {
+	if _, err := askChallenge(ch, bufio.NewReader(strings.NewReader("")), &credentials{}, map[string]bool{}); err == nil {
 		t.Fatal("要求浏览器登录时应当报错，而不是空着提交")
 	}
 }
@@ -90,10 +90,11 @@ func TestAskChallengeReusesGroup(t *testing.T) {
 
 	in := bufio.NewReader(strings.NewReader("2\nalice\npw\n"))
 	var creds credentials
-	if _, err := askChallenge(groupOnly, in, &creds); err != nil {
+	seen := map[string]bool{}
+	if _, err := askChallenge(groupOnly, in, &creds, seen); err != nil {
 		t.Fatalf("第一轮: %v", err)
 	}
-	values, err := askChallenge(full, in, &creds)
+	values, err := askChallenge(full, in, &creds, seen)
 	if err != nil {
 		t.Fatalf("第二轮: %v", err)
 	}
@@ -102,5 +103,24 @@ func TestAskChallengeReusesGroup(t *testing.T) {
 	}
 	if want := map[string]string{"k-group": "student", "k-user": "alice", "k-pass": "pw"}; !maps.Equal(values, want) {
 		t.Errorf("第二轮提交的表单 %v，想要 %v", values, want)
+	}
+}
+
+// TestAskMode 确认模式一定会问，而且推荐项跟着系统代理的状况走。
+func TestAskMode(t *testing.T) {
+	cases := []struct {
+		name, owner, input, want string
+		wantErr                  bool
+	}{
+		{"没人占用系统代理，回车选推荐的 system", "", "\n", ModeSystem, false},
+		{"系统代理被占用，回车选推荐的 proxy", "127.0.0.1:1082", "\n", ModeProxy, false},
+		{"手动选 proxy", "", "1\n", ModeProxy, false},
+		{"选 tun 要求改用 sudo 重新运行", "", "3\n", "", true},
+	}
+	for _, c := range cases {
+		got, err := askMode(bufio.NewReader(strings.NewReader(c.input)), "127.0.0.1:11080", c.owner)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("%s: askMode = %q, %v；想要 %q（报错 %v）", c.name, got, err, c.want, c.wantErr)
+		}
 	}
 }

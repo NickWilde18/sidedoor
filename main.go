@@ -14,7 +14,8 @@ const usage = `sidedoor —— 只让指定域名走 VPN，其余流量照常直
 用法:
   sidedoor setup [-server 地址] [-mode proxy|system|tun] [-domains 后缀,...] [-listen 地址]
                        登录一次并装成后台服务；重复运行就是重新配置
-  sidedoor status      查看后台服务和隧道状态
+  sidedoor status      查看隧道、流量和当前走 VPN 的连接
+  sidedoor dashboard   打开网页面板，看实时流量和每条连接（第一次会从 GitHub 下载面板）
   sidedoor start | stop | restart
                        启动、停止、重启后台服务
   sidedoor uninstall   卸载后台服务，删除配置和保存的密码
@@ -41,6 +42,8 @@ func main() {
 		err = cmdRun(args)
 	case "status":
 		err = cmdStatus()
+	case "dashboard":
+		err = cmdDashboard()
 	case "start", "stop", "restart":
 		err = cmdControl(os.Args[1])
 	case "uninstall":

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/dns/transport/fakeip"
 	"github.com/sagernet/sing-box/dns/transport/local"
+	_ "github.com/sagernet/sing-box/experimental/clashapi" // 在 init 里把状态接口注册进 sing-box
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/mixed"
@@ -62,7 +64,7 @@ func endpointOptions(cfg *Config, password string) map[string]any {
 }
 
 // buildOptions 把配置翻译成 sing-box 配置。结果只在内存里，不落盘——里面有密码。
-func buildOptions(cfg *Config, password string, verbose bool) (map[string]any, error) {
+func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[string]any, error) {
 	host, portText, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("监听地址 %q 不对: %w", cfg.Listen, err)
@@ -111,6 +113,15 @@ func buildOptions(cfg *Config, password string, verbose bool) (map[string]any, e
 			"default_domain_resolver": "local",
 		},
 	}
+	// 本地状态接口：sidedoor status 和网页面板从这里看当前每条连接走了哪、传了多少。
+	// 只监听本机，并且要密钥，免得别的程序或者网页里的脚本来读。
+	api := map[string]any{"external_controller": cfg.API, "secret": cfg.APISecret}
+	if cfg.Dashboard {
+		// 面板文件放在配置目录下。目录为空时，sing-box 启动时会去 GitHub 下载一次，
+		// 所以默认不开，平时启动不依赖 GitHub，见 cmdDashboard。
+		api["external_ui"] = filepath.Join(filepath.Dir(cfgPath), "ui")
+	}
+	options["experimental"] = map[string]any{"clash_api": api}
 	if cfg.Mode == ModeTUN {
 		addTUN(options, cfg)
 	}
@@ -141,11 +152,11 @@ func addTUN(options map[string]any, cfg *Config) {
 		map[string]any{"inbound": "tun-in", "port": 53, "action": "hijack-dns"},
 	}, route["rules"].([]any)...)
 	// 假 IP 和域名的对应关系存盘，服务重启后应用手里缓存的假 IP 依然有效。
-	options["experimental"] = map[string]any{"cache_file": map[string]any{
+	options["experimental"].(map[string]any)["cache_file"] = map[string]any{
 		"enabled":      true,
 		"path":         filepath.Join(configDir(true), "cache.db"),
 		"store_fakeip": true,
-	}}
+	}
 }
 
 // newBox 创建 sing-box 实例。只注册用得上的几种协议。
@@ -186,14 +197,55 @@ func vpnEndpoint(instance *box.Box) (adapter.OpenConnectEndpoint, error) {
 	return ep, nil
 }
 
-// runtimeStatus 是后台服务写给 sidedoor status 看的状态，每次隧道状态变化时覆盖。
+// runtimeStatus 是后台服务写给 sidedoor status 看的状态。隧道状态一变就覆盖，
+// 另外每隔 statsInterval 刷新一次流量。
 type runtimeStatus struct {
-	PID     int       `json:"pid"`
-	State   string    `json:"state"`
-	Message string    `json:"message"`
-	Address []string  `json:"address,omitempty"`
-	Since   time.Time `json:"since,omitzero"`
-	Updated time.Time `json:"updated"`
+	PID     int          `json:"pid"`
+	Started time.Time    `json:"started"`
+	State   string       `json:"state"`
+	Message string       `json:"message"`
+	Address []string     `json:"address,omitempty"`
+	DNS     []string     `json:"dns,omitempty"`
+	Since   time.Time    `json:"since,omitzero"`
+	Traffic trafficStats `json:"traffic"`
+	Updated time.Time    `json:"updated"`
+}
+
+// statsInterval 是流量的刷新间隔，速率也按这个间隔算。测试里会调短。
+var statsInterval = 5 * time.Second
+
+// 日志上限。system 模式下所有应用都经过 sidedoor，别的应用直连失败也会被 sing-box
+// 记进来（比如睡眠唤醒后系统 DNS 还没恢复的那几分钟），不设上限一年能涨到上 GB。
+var (
+	logLimit int64 = 10 << 20
+	logKeep  int64 = 1 << 20
+)
+
+// trimLog 在日志超过 logLimit 时只保留最后 logKeep 字节，从一整行开始。
+// launchd 以追加方式打开日志，截短之后新内容会接着写在末尾。
+func trimLog(path string) error {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= logLimit {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	tail := data[int64(len(data))-min(logKeep, int64(len(data))):]
+	if i := bytes.IndexByte(tail, '\n'); i >= 0 {
+		tail = tail[i+1:]
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(tail)
+	return err
 }
 
 func statusPath(cfgPath string) string {
@@ -207,7 +259,7 @@ const terminalRetry = 5 * time.Minute
 // runEngine 启动 sing-box 并一直跑到 ctx 取消。隧道状态每变一次就记一行日志、
 // 覆盖一次状态文件。
 func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbose bool) error {
-	options, err := buildOptions(cfg, password, verbose)
+	options, err := buildOptions(cfg, cfgPath, password, verbose)
 	if err != nil {
 		return err
 	}
@@ -222,6 +274,8 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 		return err
 	}
 	defer instance.Close()
+	counted := &traffic{}
+	instance.Router().AppendTracker(counted)
 	if err := instance.Start(); err != nil {
 		return err
 	}
@@ -232,7 +286,16 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 
 	path := statusPath(cfgPath)
 	defer os.Remove(path)
-	log.Printf("已启动：%s 模式，本地代理 %s", cfg.Mode, cfg.Listen)
+	log.Printf("已启动：%s 模式，本地代理 %s，状态接口 %s", cfg.Mode, cfg.Listen, cfg.API)
+	started := time.Now()
+	logPath, trimmedAt := logFile(cfg), started
+	if err := trimLog(logPath); err != nil {
+		log.Printf("截短日志失败: %v", err)
+	}
+	ticker := time.NewTicker(statsInterval)
+	defer ticker.Stop()
+	// rated 是上一次按间隔算出速率的快照；中途因为隧道状态变化而写文件时，沿用它的速率。
+	rated, ratedAt := counted.snapshot(), started
 	var last string
 	for {
 		// 先取通道再读状态：通道在下一次状态变化时关闭，这样读完之后发生的变化不会漏掉。
@@ -243,6 +306,8 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 			log.Print(rs.Message)
 			last = rs.Message
 		}
+		rs.Started = started
+		rs.Traffic = counted.snapshot().ratesFrom(rated)
 		if err := writeStatus(path, rs); err != nil {
 			log.Printf("写状态文件失败: %v", err)
 		}
@@ -254,6 +319,15 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 		case <-ctx.Done():
 			return nil
 		case <-updated:
+		case now := <-ticker.C:
+			rated = counted.snapshot().withRates(rated, now.Sub(ratedAt))
+			ratedAt = now
+			if now.Sub(trimmedAt) >= 10*time.Minute {
+				if err := trimLog(logPath); err != nil {
+					log.Printf("截短日志失败: %v", err)
+				}
+				trimmedAt = now
+			}
 		case <-retry:
 			return fmt.Errorf("隧道出错 %v 仍未恢复：%s", terminalRetry, st.Error)
 		}
@@ -268,6 +342,9 @@ func describe(st adapter.OpenConnectStatus) runtimeStatus {
 		if info := st.TunnelInfo; info != nil {
 			for _, p := range info.IPv4 {
 				rs.Address = append(rs.Address, p.Addr().String())
+			}
+			for _, a := range info.DNS {
+				rs.DNS = append(rs.DNS, a.String())
 			}
 			rs.Since = info.ConnectedSince
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -19,12 +21,15 @@ import (
 // 这里只存稳定的标识：服务器存主机名而不是 URL，认证组存组名。认证过程中的表单
 // 地址、会话 cookie 都只在运行时存在于内存里。密码不在这里，见 savePassword。
 type Config struct {
-	Server   string   `json:"server"` // VPN 服务器主机名，可带端口
-	Username string   `json:"username"`
-	Group    string   `json:"group,omitempty"` // 认证组；空表示用服务器默认的组
-	Domains  []string `json:"domains"`         // 走 VPN 的域名后缀
-	Listen   string   `json:"listen"`          // 本地代理的监听地址
-	Mode     string   `json:"mode"`            // proxy、system 或 tun
+	Server    string   `json:"server"` // VPN 服务器主机名，可带端口
+	Username  string   `json:"username"`
+	Group     string   `json:"group,omitempty"`     // 认证组；空表示用服务器默认的组
+	Domains   []string `json:"domains"`             // 走 VPN 的域名后缀
+	Listen    string   `json:"listen"`              // 本地代理的监听地址
+	Mode      string   `json:"mode"`                // proxy、system 或 tun
+	API       string   `json:"api"`                 // 本地状态接口的监听地址，连接明细和网页面板都从这里取
+	APISecret string   `json:"api_secret"`          // 状态接口的密钥，挡住本机别的程序和网页
+	Dashboard bool     `json:"dashboard,omitempty"` // 是否提供网页面板
 }
 
 const (
@@ -83,7 +88,38 @@ func (c *Config) save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	// 里面有状态接口的密钥。WriteFile 不会改已存在文件的权限，所以再收紧一次。
+	return os.Chmod(path, 0o600)
+}
+
+// fillDefaults 给旧版本写的配置补上后来加的字段，返回是否补了东西。
+func (c *Config) fillDefaults() bool {
+	changed := false
+	if c.API == "" {
+		c.API = nextPort(c.Listen)
+		changed = true
+	}
+	if c.APISecret == "" {
+		c.APISecret = rand.Text()
+		changed = true
+	}
+	return changed
+}
+
+// nextPort 把状态接口放在本地代理的下一个端口上。
+func nextPort(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "127.0.0.1:11081"
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return "127.0.0.1:11081"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n+1))
 }
 
 // keyringAccount 是密码在钥匙串里的账户名。带上服务器，换服务器时不会串号。
@@ -121,6 +157,14 @@ func (c *Config) password() (string, error) {
 		return "", fmt.Errorf("钥匙串里没有 %s 的密码，重新运行 sidedoor setup: %w", c.keyringAccount(), err)
 	}
 	return pw, nil
+}
+
+// passwordPlace 用一句话说明密码存在哪，setup 和 uninstall 都会告诉用户。
+func passwordPlace(c *Config) string {
+	if c.Mode == ModeTUN {
+		return "只有 root 能读的文件 " + passwordFile()
+	}
+	return fmt.Sprintf("系统钥匙串，服务 %s，账户 %s", keyringService, c.keyringAccount())
 }
 
 func (c *Config) deletePassword() error {
