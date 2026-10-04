@@ -215,6 +215,11 @@ func cmdStatus() error {
 	} else {
 		row("网页面板", "未开启，运行 sidedoor dashboard")
 	}
+	if cfg.Overlay != "" {
+		row("叠加层", cfg.Overlay+"（只转发走 VPN 的域名），文件在 "+overlayDir(path))
+	} else {
+		row("叠加层", "未开启；和别的代理软件一起用时运行 sidedoor overlay")
+	}
 	row("日志", logFile(cfg))
 	return nil
 }
@@ -399,6 +404,7 @@ func cmdUninstall() error {
 		_ = os.Remove(filepath.Join(dir, name))
 	}
 	_ = os.RemoveAll(filepath.Join(dir, "ui"))
+	_ = os.RemoveAll(overlayDir(path))
 	_ = os.Remove(dir) // 目录里还有别的东西就留着
 	done("已删除配置 %s", dir)
 	note("日志留在 %s，不需要的话可以手动删掉", logDir(cfg.Mode == ModeTUN))

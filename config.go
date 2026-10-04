@@ -30,6 +30,7 @@ type Config struct {
 	API       string   `json:"api"`                 // 本地状态接口的监听地址，连接明细和网页面板都从这里取
 	APISecret string   `json:"api_secret"`          // 状态接口的密钥，挡住本机别的程序和网页
 	Dashboard bool     `json:"dashboard,omitempty"` // 是否提供网页面板
+	Overlay   string   `json:"overlay,omitempty"`   // 叠加层专用端口的监听地址：只转发走 VPN 的域名；空表示没开
 }
 
 const (
@@ -129,6 +130,14 @@ func (c *Config) fillDefaults() bool {
 }
 
 // nextPort 把状态接口放在本地代理的下一个端口上。
+// serverHost 是 VPN 服务器去掉端口后的主机名。
+func (c *Config) serverHost() string {
+	if h, _, err := net.SplitHostPort(c.Server); err == nil {
+		return h
+	}
+	return c.Server
+}
+
 func nextPort(listen string) string {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {

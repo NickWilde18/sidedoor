@@ -20,6 +20,7 @@ make install          # 装到 $(go env GOPATH)/bin/sidedoor
 sidedoor setup        # 按提示一步步来：选模式、登录、选域名，装好后台服务
 sidedoor status       # 隧道状态、流量、当前走 VPN 的连接
 sidedoor dashboard    # 网页面板：实时流量和每一条连接
+sidedoor overlay      # 和别的代理软件一起用：生成导入一次就行的叠加层，见下文
 sidedoor stop / start / restart
 sidedoor uninstall    # 卸载服务，删掉配置和保存的密码
 sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 goroutine 的栈，不用重启它
@@ -49,18 +50,50 @@ sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 g
 
 ### 已经在用代理工具（proxy 模式）
 
-在工具里把要走 VPN 的域名转发到 `socks5://127.0.0.1:11080`，以 Shadowrocket 为例：
+用 `sidedoor overlay` 生成叠加层，在代理工具里导入一次就行，订阅照常更新，见下面的[和其他代理软件一起用](#和其他代理软件一起用)。
+
+配置是本地的、不会被订阅覆盖的话，也可以直接在里面加，以 Shadowrocket 为例。第一条不能少，也不能挪到后面：VPN 服务器的域名也在学校后缀下面，不先让它直连，sidedoor 自己连 VPN 的流量会被送回 sidedoor。
 
 ```
 [Proxy]
 VPN = socks5, 127.0.0.1, 11080
 
 [Rule]
+DOMAIN,vpn.example.edu,DIRECT
 DOMAIN-SUFFIX,example.edu,VPN
 FINAL,DIRECT
 ```
 
 如果之前用的是 OpenConnect 加 ocproxy，端口本来就是 11080，原来的规则不用改，关掉那两个程序就行。
+
+## 和其他代理软件一起用
+
+```sh
+sidedoor overlay
+```
+
+第一次运行时，会在配置里打开叠加层专用端口 `127.0.0.1:11082`，然后在配置目录的 `overlays/` 下写出三个文件。在代理软件里导入一次，订阅里的内容一行不用改，怎么更新都不受影响。这时 sidedoor 建议用 proxy 模式，系统代理交给代理软件。
+
+叠加层专用端口只转发走 VPN 的域名，其余一律拒绝。代理软件的自动选择组拿它测速会失败，不会把它选中。如果某个手动选择组的默认项变成了 `sidedoor`，普通网站会打不开，把那个组切回原来的节点就行；它不会悄悄绕开你自己的节点。
+
+| 文件 | 内容 | 在哪里导入 |
+|---|---|---|
+| `overlay.module` | 规则模块，只有规则 | Shadowrocket：「配置 → 模块 → 新建模块」，把文件内容粘进去。再在首页添加一个 SOCKS5 节点，地址 `127.0.0.1`，端口 `11082`，备注填 `sidedoor` |
+| `overlay.js` | `main(config)` 脚本，节点和规则一起加 | Clash Verge Rev：全局扩展脚本，或者某个订阅的扩展脚本。FlClash：订阅的覆写选「脚本」。Clash Party：新建 JavaScript 覆写 |
+| `overlay.yaml` | YAML 覆写，节点和规则一起加 | Stash：覆写 |
+
+下面这些软件不生成文件，按这样写：
+
+- **Surge**：模块里加不了节点。用托管配置的 `#!include` 写一份叠加配置，把 `VPN = socks5, 127.0.0.1, 11082` 和两条规则写在 include 语句前面。
+- **Loon**：本来就是本地主配置，订阅节点在 `[Remote Proxy]` 里。直接在 `[Proxy]` 加节点、在 `[Rule]` 加两条规则，本地规则优先于订阅规则。
+- **Quantumult X**：在 `[server_local]` 加 `socks5=127.0.0.1:11082, tag=sidedoor`，在 `[policy]` 加 `static=sidedoor-p, sidedoor`，在 `[filter_local]` 加 `host, vpn.example.edu, direct` 和 `host-suffix, example.edu, sidedoor-p`。默认开启的「分流匹配优化」会按规则类型重排，订阅里要是有一条 `host` 规则命中同一个域名，会压过这里的 `host-suffix`。
+
+注意：
+
+- 文件里的规则已经排好顺序：先让 VPN 服务器本身直连，再把学校域名交给 sidedoor。
+- Stash 的覆写会把节点插到节点列表最前面。
+- 以后改了走 VPN 的域名，重新 `sidedoor setup` 时会自动更新这些文件，再在代理软件里导入一次就行。
+- 下面两点还没在真机上验证：Shadowrocket 模块里的规则能否按名字引用首页节点（只有社区资料这么写）；Clash Nyanpasu 能否直接用 `overlay.js`。
 
 ## 状态和流量
 
@@ -104,6 +137,7 @@ sidedoor 状态
 | 日志 | `~/Library/Logs/sidedoor/com.nickwilde.sidedoor.err.log`；tun 模式在 `/Library/Logs/sidedoor/`。超过 10 MB 时只保留最后 1 MB |
 | 后台任务 | `~/Library/LaunchAgents/com.nickwilde.sidedoor.plist`；tun 模式在 `/Library/LaunchDaemons/` |
 | 网页面板文件 | 配置目录下的 `ui/` |
+| 叠加层文件 | 配置目录下的 `overlays/` |
 | 调试接口（pprof） | 配置目录下的 `debug.sock`，只有你能读写；tun 模式要 sudo。`sidedoor debug heap -o 文件` 导出 heap profile |
 
 ## 限制

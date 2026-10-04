@@ -16,6 +16,7 @@ const usage = `sidedoor —— 只让指定域名走 VPN，其余流量照常直
                        登录一次并装成后台服务；重复运行就是重新配置
   sidedoor status      查看隧道、流量和当前走 VPN 的连接
   sidedoor dashboard   打开网页面板，看实时流量和每条连接（第一次会从 GitHub 下载面板）
+  sidedoor overlay     和别的代理软件一起用：生成在它里面导入一次就行的叠加层，订阅照常更新
   sidedoor start | stop | restart
                        启动、停止、重启后台服务
   sidedoor uninstall   卸载后台服务，删除配置和保存的密码
@@ -46,6 +47,8 @@ func main() {
 		err = cmdStatus()
 	case "dashboard":
 		err = cmdDashboard()
+	case "overlay":
+		err = cmdOverlay()
 	case "start", "stop", "restart":
 		err = cmdControl(os.Args[1])
 	case "uninstall":

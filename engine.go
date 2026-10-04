@@ -73,10 +73,7 @@ func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("监听端口 %q 不对", portText)
 	}
-	serverHost := cfg.Server
-	if h, _, err := net.SplitHostPort(cfg.Server); err == nil {
-		serverHost = h
-	}
+	serverHost := cfg.serverHost()
 	level := "warn"
 	if verbose {
 		level = "info"
@@ -124,10 +121,53 @@ func buildOptions(cfg *Config, cfgPath, password string, verbose bool) (map[stri
 		api["external_ui"] = filepath.Join(filepath.Dir(cfgPath), "ui")
 	}
 	options["experimental"] = map[string]any{"clash_api": api}
+	if cfg.Overlay != "" {
+		if err := addOverlay(options, cfg, serverHost); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Mode == ModeTUN {
 		addTUN(options, cfg, serverHost)
 	}
 	return options, nil
+}
+
+// addOverlay 追加叠加层专用端口：代理软件里导入的叠加层把走 VPN 的域名转到这里。
+//
+// 这个端口只转发走 VPN 的域名，其余一律拒绝。代理软件的自动选择组拿它测速会失败，
+// 不会把它当成普通节点选中；就算被手动选中，也只是普通网站打不开，不会悄悄把用户
+// 自己的节点绕过去直连。
+func addOverlay(options map[string]any, cfg *Config, serverHost string) error {
+	host, portText, err := net.SplitHostPort(cfg.Overlay)
+	if err != nil {
+		return fmt.Errorf("叠加层端口 %q 不对: %w", cfg.Overlay, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return fmt.Errorf("叠加层端口 %q 不对", portText)
+	}
+	options["inbounds"] = append(options["inbounds"].([]any), map[string]any{
+		"type":        "mixed",
+		"tag":         "overlay-in",
+		"listen":      host,
+		"listen_port": port,
+	})
+	route := options["route"].(map[string]any)
+	route["rules"] = append([]any{
+		// 代理软件只发来 IP 时，从 TLS 或 HTTP 里认出域名，后面的规则才认得。
+		map[string]any{"inbound": "overlay-in", "action": "sniff"},
+		// VPN 服务器本身不走 VPN；叠加层里已经让它直连，到这里说明规则顺序乱了。
+		map[string]any{"inbound": "overlay-in", "domain": []string{serverHost}, "action": "reject"},
+		map[string]any{
+			"type": "logical", "mode": "and",
+			"rules": []any{
+				map[string]any{"inbound": "overlay-in"},
+				map[string]any{"domain_suffix": cfg.Domains, "invert": true},
+			},
+			"action": "reject",
+		},
+	}, route["rules"].([]any)...)
+	return nil
 }
 
 // addTUN 追加 tun 模式需要的部分：一块只接管假 IP 段的虚拟网卡，以及把要走 VPN

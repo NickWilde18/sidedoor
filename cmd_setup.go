@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -47,7 +48,7 @@ func cmdSetup(args []string) error {
 		prev = &Config{}
 	}
 	// 重新配置时沿用状态接口的地址和密钥，登录过网页面板的不用重新填。
-	cfg := &Config{Listen: *listen, Mode: *mode, Dashboard: prev.Dashboard, APISecret: prev.APISecret}
+	cfg := &Config{Listen: *listen, Mode: *mode, Dashboard: prev.Dashboard, APISecret: prev.APISecret, Overlay: prev.Overlay}
 	if prev.Listen == *listen {
 		cfg.API = prev.API
 	}
@@ -75,12 +76,20 @@ func cmdSetup(args []string) error {
 	if stopped {
 		done("停掉了正在运行的 sidedoor 后台服务：腾出端口，也免得服务器上同时挂着两个会话")
 	}
-	for _, addr := range []string{cfg.Listen, cfg.API} {
+	addrs := []string{cfg.Listen, cfg.API}
+	if cfg.Overlay != "" {
+		addrs = append(addrs, cfg.Overlay)
+	}
+	for _, addr := range addrs {
 		if err := checkPortFree(addr); err != nil {
 			return err
 		}
 	}
-	done("本地端口空闲：%s（代理）、%s（状态接口）", cfg.Listen, cfg.API)
+	if cfg.Overlay != "" {
+		done("本地端口空闲：%s（代理）、%s（状态接口）、%s（叠加层）", cfg.Listen, cfg.API, cfg.Overlay)
+	} else {
+		done("本地端口空闲：%s（代理）、%s（状态接口）", cfg.Listen, cfg.API)
+	}
 
 	s.next("选择模式")
 	if cfg.Mode == "" {
@@ -138,6 +147,17 @@ func cmdSetup(args []string) error {
 		return err
 	}
 	done("配置已写入 %s", path)
+	// 叠加层文件里写着域名和服务器，跟着配置一起更新；规则变了的话，代理软件里要重新导入。
+	if cfg.Overlay != "" {
+		if _, err := writeOverlayFiles(path, cfg); err != nil {
+			return err
+		}
+		if slices.Equal(overlayRules(prev), overlayRules(cfg)) {
+			done("叠加层文件已更新：%s", overlayDir(path))
+		} else {
+			warn("走 VPN 的域名或服务器变了，叠加层文件已更新（%s），要在代理软件里重新导入一次", overlayDir(path))
+		}
+	}
 	if err := cfg.savePassword(creds.password); err != nil {
 		return fmt.Errorf("保存密码失败: %w", err)
 	}

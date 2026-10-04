@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,20 +46,78 @@ func testConfig(t *testing.T, mode string) *Config {
 // 不启动：系统代理、虚拟网卡和面板下载都要到 Start 才会动，测试不会改到本机设置。
 func TestOptionsAccepted(t *testing.T) {
 	for _, mode := range []string{ModeProxy, ModeSystem, ModeTUN} {
-		for _, dashboard := range []bool{false, true} {
+		for _, extras := range []struct{ dashboard, overlay bool }{{false, false}, {true, false}, {false, true}} {
 			cfg := testConfig(t, mode)
-			cfg.Dashboard = dashboard
+			cfg.Dashboard = extras.dashboard
+			if extras.overlay {
+				cfg.Overlay = freeAddr(t)
+			}
 			options, err := buildOptions(cfg, filepath.Join(t.TempDir(), "config.json"), "pw", false)
 			if err != nil {
 				t.Fatal(err)
 			}
 			instance, err := newBox(context.Background(), options)
 			if err != nil {
-				t.Fatalf("%s 模式（面板 %v）: %v", mode, dashboard, err)
+				t.Fatalf("%s 模式（面板 %v，叠加层 %v）: %v", mode, extras.dashboard, extras.overlay, err)
 			}
 			_ = instance.Close()
 		}
 	}
+}
+
+// TestOverlayRejectsOtherTraffic 确认叠加层专用端口只转发走 VPN 的域名：代理软件的自动选择组
+// 拿它测速、或者它被误选成普通节点时，别的目标必须被拒绝，不能被直连出去、悄悄绕开用户自己
+// 的节点。同一个目标经普通的本地代理照常直连，说明是端口的规则在起作用。
+func TestOverlayRejectsOtherTraffic(t *testing.T) {
+	var hits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, "direct")
+	}))
+	defer backend.Close()
+	_, port, _ := net.SplitHostPort(backend.Listener.Addr().String())
+
+	cfg := testConfig(t, ModeProxy)
+	cfg.Domains = []string{"localhost"}
+	cfg.Overlay = freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runEngine(ctx, cfg, filepath.Join(t.TempDir(), "config.json"), "pw", false) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitListening(t, cfg.Overlay)
+
+	for _, scheme := range []string{"socks5", "http"} {
+		client := &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: scheme, Host: cfg.Overlay})},
+		}
+		// 不在列表里的目标：拒绝。列表里的域名：交给 VPN 端点（连不上），也到不了测试服务器。
+		for _, target := range []string{backend.URL, "http://localhost:" + port + "/"} {
+			if resp, err := client.Get(target); err == nil {
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if string(body) == "direct" {
+					t.Errorf("%s: 经叠加层端口访问 %s 被直连了，应当拒绝或交给 VPN", scheme, target)
+				}
+			}
+		}
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("经叠加层端口的请求不该到达测试服务器，实际到了 %d 次", n)
+	}
+
+	direct := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: cfg.Listen})},
+	}
+	resp, err := direct.Get(backend.URL)
+	if err != nil {
+		t.Fatalf("同一个目标经普通的本地代理应当直连成功: %v", err)
+	}
+	_ = resp.Body.Close()
 }
 
 // TestRouting 真的跑起 proxy 模式的引擎，确认分流接对了、流量记对了。
