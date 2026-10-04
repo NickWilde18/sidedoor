@@ -125,5 +125,3 @@ sing-box 锁定在 v1.14.2。它的 Go 接口在小版本之间经常有破坏�
 Copyright (C) 2026 Yechi Yang
 
 sidedoor 以 GPLv3 发布，全文见 [LICENSE](LICENSE)。
-
-内嵌的 sing-box 同样采用 GPLv3，另外附加了一条：衍生作品不得使用它的名字，也不得暗示与它有关联。分发编译好的二进制时，要按 GPLv3 一并提供源码。
