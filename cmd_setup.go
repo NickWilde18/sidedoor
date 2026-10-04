@@ -428,12 +428,26 @@ func ask(in *bufio.Reader, label, def string) (string, error) {
 
 // askSecret 读密码：在终端里不回显；从管道读入时按普通的一行读，方便脚本和测试。
 func askSecret(in *bufio.Reader, label string) (string, error) {
-	fmt.Printf("    %s: ", label)
-	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
+	return readSecret(os.Stdin, os.Stdout, in, label)
+}
+
+// readSecret 是 askSecret 的实现，终端和提示的输出处可以换掉，方便测试。
+//
+// 先关回显再打印提示：ReadPassword 被调用时才关回显，要是先打印，看到提示就立刻输入的
+// 程序（比如 expect 脚本）打的字会赶在回显关掉之前被回显出来。
+func readSecret(tty *os.File, out io.Writer, in *bufio.Reader, label string) (string, error) {
+	if fd := int(tty.Fd()); term.IsTerminal(fd) {
+		restore, err := echoOff(fd)
+		if err != nil {
+			return "", err
+		}
+		defer restore()
+		fmt.Fprintf(out, "    %s: ", label)
 		b, err := term.ReadPassword(fd)
-		fmt.Println()
+		fmt.Fprintln(out)
 		return string(b), err
 	}
+	fmt.Fprintf(out, "    %s: ", label)
 	line, err := in.ReadString('\n')
 	if err != nil && (line == "" || !errors.Is(err, io.EOF)) {
 		return "", fmt.Errorf("读取输入失败: %w", err)
