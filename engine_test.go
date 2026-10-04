@@ -319,3 +319,20 @@ func TestDirectUsesSystemResolver(t *testing.T) {
 		t.Fatalf("只有系统解析器认识的名字，经代理直连应当能打开；实际 %s %q", resp.Status, body)
 	}
 }
+
+// TestServiceLogHasNoColor 钉住「后台服务的日志文件里全是颜色码」：sing-box 只在写日志文件时才
+// 关颜色，而后台服务的日志是写到 stderr、由 launchd 存进文件的。stderr 不是终端时要关掉颜色，
+// 在终端里前台运行时照旧有颜色。
+func TestServiceLogHasNoColor(t *testing.T) {
+	defer func(c bool) { colorErr = c }(colorErr)
+	for _, terminal := range []bool{false, true} {
+		colorErr = terminal
+		_, parsed, err := parseOptions(context.Background(), map[string]any{"log": map[string]any{"level": "warn"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Log.DisableColor == terminal {
+			t.Errorf("stderr 是终端：%v，DisableColor 应当是 %v，实际 %v", terminal, !terminal, parsed.Log.DisableColor)
+		}
+	}
+}

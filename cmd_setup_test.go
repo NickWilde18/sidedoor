@@ -154,12 +154,21 @@ func TestLoginStopsAfterRepeatedRejections(t *testing.T) {
 	server := newRejectingServer()
 	// 够提交 10 次的输入：第一轮还要选组（回车取预选的），之后沿用。
 	input := "alice\npw\n\n" + strings.Repeat("alice\npw\n", 9)
-	_, _, err := answerLogin(context.Background(), server, bufio.NewReader(strings.NewReader(input)))
+	var err error
+	out := captureStdout(t, func() {
+		_, _, err = answerLogin(context.Background(), server, bufio.NewReader(strings.NewReader(input)))
+	})
 	if server.submitted != 3 {
 		t.Errorf("服务器一直拒绝时只该试 3 次，实际提交了 %d 次", server.submitted)
 	}
 	if err == nil || !strings.Contains(err.Error(), "连续 3 次") {
 		t.Errorf("连续被拒 3 次应当停下并说明原因，实际返回 %v", err)
+	}
+	// 每次被拒都说清楚还能再试几次。
+	for _, want := range []string{"还能再试 2 次", "还能再试 1 次"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("被拒之后应当提示「%s」，实际输出 %q", want, out)
+		}
 	}
 }
 

@@ -59,7 +59,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "sidedoor:", err)
+		fmt.Fprintln(os.Stderr, paint(colorErr, ansiRed, "sidedoor: "+err.Error()))
 		os.Exit(1)
 	}
 }

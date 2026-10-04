@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,8 +82,10 @@ func TestSecretPromptAfterEchoOff(t *testing.T) {
 	}
 
 	var echoAtWrite []bool
+	var prompt strings.Builder
 	out := writerFunc(func(p []byte) (int, error) {
 		echoAtWrite = append(echoAtWrite, echoOn(t, tty))
+		prompt.Write(p)
 		return len(p), nil
 	})
 	got, err := readSecret(tty, out, bufio.NewReader(tty), "Password")
@@ -97,6 +100,10 @@ func TestSecretPromptAfterEchoOff(t *testing.T) {
 	}
 	if !echoOn(t, tty) {
 		t.Error("读完密码之后终端回显应当恢复")
+	}
+	// 输入时什么都不显示，提示里要说一声，不然容易以为卡住了。
+	if !strings.Contains(prompt.String(), "输入时不显示") {
+		t.Errorf("密码提示应当说明输入时不显示，实际 %q", prompt.String())
 	}
 }
 

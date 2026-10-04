@@ -168,6 +168,15 @@ func addTUN(options map[string]any, cfg *Config, serverHost string) {
 
 // newBox 创建 sing-box 实例。只注册用得上的几种协议。
 func newBox(ctx context.Context, options map[string]any) (*box.Box, error) {
+	ctx, parsed, err := parseOptions(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return box.New(box.Options{Context: ctx, Options: parsed})
+}
+
+// parseOptions 把生成的配置交给 sing-box 解析，返回带着协议注册表的 ctx。
+func parseOptions(ctx context.Context, options map[string]any) (context.Context, option.Options, error) {
 	inbounds := inbound.NewRegistry()
 	mixed.RegisterInbound(inbounds)
 	tun.RegisterInbound(inbounds)
@@ -184,13 +193,18 @@ func newBox(ctx context.Context, options map[string]any) (*box.Box, error) {
 
 	raw, err := json.Marshal(options)
 	if err != nil {
-		return nil, err
+		return nil, option.Options{}, err
 	}
 	parsed, err := singjson.UnmarshalExtendedContext[option.Options](ctx, raw)
 	if err != nil {
-		return nil, fmt.Errorf("生成的 sing-box 配置有误: %w", err)
+		return nil, option.Options{}, fmt.Errorf("生成的 sing-box 配置有误: %w", err)
 	}
-	return box.New(box.Options{Context: ctx, Options: parsed})
+	// sing-box 只在写日志文件时才关颜色。后台服务的日志写到 stderr、由 launchd 存进文件，
+	// 颜色码就跟着进了日志；stderr 不是终端时关掉，前台在终端里跑时照旧有颜色。
+	if parsed.Log != nil {
+		parsed.Log.DisableColor = !colorErr
+	}
+	return ctx, parsed, nil
 }
 
 func vpnEndpoint(instance *box.Box) (adapter.OpenConnectEndpoint, error) {

@@ -367,6 +367,7 @@ func answerLogin(ctx context.Context, ep authEndpoint, in *bufio.Reader) (creden
 					_ = ep.CancelAuthChallenge(ch.ID)
 					return creds, nil, fmt.Errorf("登录连续 %d 次被拒（服务器说：%s），先停下，免得账号被锁；确认用户名和密码后再运行 sidedoor setup", rejected, ch.Error)
 				}
+				warn("服务器提示：%s（还能再试 %d 次）", ch.Error, maxRejected-rejected)
 			}
 			values, err := askChallenge(ch, in, &creds, seen)
 			if err != nil {
@@ -402,9 +403,6 @@ func askChallenge(ch *adapter.OpenConnectAuthChallenge, in *bufio.Reader, creds 
 			note("服务器说：%s", text)
 		}
 	}
-	if ch.Error != "" {
-		warn("服务器提示：%s", ch.Error)
-	}
 	values := make(map[string]string, len(ch.Form.Fields))
 	for _, field := range ch.Form.Fields {
 		label := strings.TrimSuffix(strings.TrimSpace(field.Label), ":")
@@ -435,9 +433,16 @@ func askChallenge(ch *adapter.OpenConnectAuthChallenge, in *bufio.Reader, creds 
 	return values, nil
 }
 
+// defaultHinted 记着「方括号里是默认值」说过没有：只在第一次遇到默认值时说一遍。
+var defaultHinted bool
+
 // ask 提问并读一行；直接回车取默认值。
 func ask(in *bufio.Reader, label, def string) (string, error) {
 	if def != "" {
+		if !defaultHinted {
+			defaultHinted = true
+			hint("方括号里是默认值，直接回车就用它")
+		}
 		fmt.Printf("    %s [%s]: ", label, def)
 	} else {
 		fmt.Printf("    %s: ", label)
@@ -468,7 +473,8 @@ func readSecret(tty *os.File, out io.Writer, in *bufio.Reader, label string) (st
 			return "", err
 		}
 		defer restore()
-		fmt.Fprintf(out, "    %s: ", label)
+		// 输入时什么都不显示，不说一声容易以为卡住了。
+		fmt.Fprintf(out, "    %s（输入时不显示）: ", label)
 		b, err := term.ReadPassword(fd)
 		fmt.Fprintln(out)
 		return string(b), err
