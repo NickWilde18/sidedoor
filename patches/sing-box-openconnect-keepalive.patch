@@ -1,0 +1,102 @@
+--- a/transport/openconnect/device_stack.go
++++ b/transport/openconnect/device_stack.go
+@@ -4,11 +4,13 @@
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"net"
+ 	"net/netip"
+ 	"slices"
+ 	"sync"
+ 	"sync/atomic"
++	"time"
+ 
+ 	"github.com/sagernet/gvisor/pkg/buffer"
+ 	"github.com/sagernet/gvisor/pkg/tcpip"
+@@ -20,6 +22,7 @@
+ 	"github.com/sagernet/gvisor/pkg/tcpip/transport/icmp"
+ 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
+ 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
++	"github.com/sagernet/gvisor/pkg/waiter"
+ 	"github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/buf"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -202,7 +205,7 @@
+ 	}
+ 	switch N.NetworkName(network) {
+ 	case N.NetworkTCP:
+-		return gonet.DialTCPWithBind(ctx, d.stack, bind, address, networkProtocol)
++		return dialTCPWithKeepAlive(ctx, d.stack, bind, address, networkProtocol)
+ 	case N.NetworkUDP:
+ 		return gonet.DialUDP(d.stack, &bind, &address, networkProtocol)
+ 	default:
+@@ -210,6 +213,68 @@
+ 	}
+ }
+ 
++// sidedoor patch: dialTCPWithKeepAlive is gonet.DialTCPWithBind plus the keepalive that
++// transport/wireguard/device_stack_gonet.go already sets. Without it, a connection that the
++// client has half-closed waits forever when the server's FIN is lost in the tunnel: gVisor
++// only starts the FIN-WAIT-2 timer after Close, and route/conn.go waits for both directions.
++func dialTCPWithKeepAlive(ctx context.Context, s *stack.Stack, localAddr, remoteAddr tcpip.FullAddress, network tcpip.NetworkProtocolNumber) (*gonet.TCPConn, error) {
++	// Create TCP endpoint, then connect.
++	var wq waiter.Queue
++	ep, err := s.NewEndpoint(tcp.ProtocolNumber, network, &wq)
++	if err != nil {
++		return nil, gonet.TranslateNetstackError(err)
++	}
++
++	// Create wait queue entry that notifies a channel.
++	//
++	// We do this unconditionally as Connect will always return an error.
++	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
++	wq.EventRegister(&waitEntry)
++	defer wq.EventUnregister(&waitEntry)
++
++	select {
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	default:
++	}
++
++	// Bind before connect if requested.
++	if localAddr != (tcpip.FullAddress{}) {
++		if err = ep.Bind(localAddr); err != nil {
++			return nil, fmt.Errorf("ep.Bind(%+v) = %s", localAddr, err)
++		}
++	}
++
++	err = ep.Connect(remoteAddr)
++	if _, ok := err.(*tcpip.ErrConnectStarted); ok {
++		select {
++		case <-ctx.Done():
++			ep.Close()
++			return nil, ctx.Err()
++		case <-notifyCh:
++		}
++
++		err = ep.LastError()
++	}
++	if err != nil {
++		ep.Close()
++		return nil, &net.OpError{
++			Op:   "connect",
++			Net:  "tcp",
++			Addr: M.SocksaddrFromNetIP(netip.AddrPortFrom(tun.AddrFromAddress(remoteAddr.Addr), remoteAddr.Port)).TCPAddr(),
++			Err:  gonet.TranslateNetstackError(err),
++		}
++	}
++
++	ep.SocketOptions().SetKeepAlive(true)
++	keepAliveIdle := tcpip.KeepaliveIdleOption(15 * time.Second)
++	ep.SetSockOpt(&keepAliveIdle)
++	keepAliveInterval := tcpip.KeepaliveIntervalOption(15 * time.Second)
++	ep.SetSockOpt(&keepAliveInterval)
++
++	return gonet.NewTCPConn(&wq, ep), nil
++}
++
+ func (d *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+ 	inet4Address, inet6Address := d.PortAddresses()
+ 	bind := tcpip.FullAddress{

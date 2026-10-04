@@ -12,7 +12,7 @@
 make install          # 装到 $(go env GOPATH)/bin/sidedoor
 ```
 
-必须用 `make`：sing-box 的用户态协议栈放在 `with_gvisor` 编译标签后面，直接 `go build` 编出来的二进制启动时会报错。
+必须用 `make`：sing-box 的用户态协议栈放在 `with_gvisor` 编译标签后面，直接 `go build` 编出来的二进制启动时会报错；make 还会给 sing-box 打上 `patches/` 里的补丁（见[开发](#开发)）。
 
 ## 使用
 
@@ -119,6 +119,8 @@ make test
 ```
 
 sing-box 锁定在 v1.14.2。它的 Go 接口在小版本之间经常有破坏性改动，升级时先跑一遍 `make test`。
+
+`patches/` 里是给 sing-box 打的补丁：它的 OpenConnect 网络栈拨出的 TCP 没开 keepalive，客户端先关、服务器的 FIN 又丢在隧道里时，连接会永远挂着。Go 不允许用 `-overlay` 替换模块缓存里的文件，所以 make 先把 sing-box 复制到 `.build/`、打上补丁，再用一份加了 replace 的 go.mod（`-modfile`）编译，仓库里的 go.mod 不动。直接 `go test` 用的是没打补丁的 sing-box，`TestVPNHalfClosedConnEndsWhenPeerVanishes` 会失败。升级 sing-box 时先核对补丁，再改 Makefile 里的 `PATCHED_SINGBOX`；版本对不上，make 会直接报错。
 
 ## 许可证
 
