@@ -2,9 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -103,6 +106,60 @@ func TestAskChallengeReusesGroup(t *testing.T) {
 	}
 	if want := map[string]string{"k-group": "student", "k-user": "alice", "k-pass": "pw"}; !maps.Equal(values, want) {
 		t.Errorf("第二轮提交的表单 %v，想要 %v", values, want)
+	}
+}
+
+// rejectingServer 是一台一直拒绝登录的假服务器：每提交一次，就带着 "Login failed." 重发一份
+// 表单，和密码错了时真实服务器的反应一样。
+type rejectingServer struct {
+	mu        sync.Mutex
+	submitted int
+	updated   chan struct{}
+}
+
+func newRejectingServer() *rejectingServer { return &rejectingServer{updated: make(chan struct{})} }
+
+func (s *rejectingServer) OpenConnectStatus() adapter.OpenConnectStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := loginForm()
+	ch.ID = strconv.Itoa(s.submitted)
+	if s.submitted > 0 {
+		ch.Error = "Login failed."
+	}
+	return adapter.OpenConnectStatus{State: adapter.OpenConnectStateAuthPending, AuthChallenge: ch}
+}
+
+func (s *rejectingServer) StatusUpdated() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updated
+}
+
+func (s *rejectingServer) CompleteAuthChallenge(string, adapter.OpenConnectAuthResponse) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.submitted++
+	close(s.updated)
+	s.updated = make(chan struct{})
+	return nil
+}
+
+func (s *rejectingServer) CancelAuthChallenge(string) error { return nil }
+
+// TestLoginStopsAfterRepeatedRejections 钉住「setup 登录失败没有次数上限」：服务器每拒绝一次就
+// 重发一份表单，setup 就接着问，T4 的自动脚本在 6 分钟里提交了 519 次。学校账号连续输错会被
+// 锁（后台服务被拒时也是这个原因不再重试），连续被拒 3 次就该停下，说明原因。
+func TestLoginStopsAfterRepeatedRejections(t *testing.T) {
+	server := newRejectingServer()
+	// 够提交 10 次的输入：第一轮还要选组（回车取预选的），之后沿用。
+	input := "alice\npw\n\n" + strings.Repeat("alice\npw\n", 9)
+	_, _, err := answerLogin(context.Background(), server, bufio.NewReader(strings.NewReader(input)))
+	if server.submitted != 3 {
+		t.Errorf("服务器一直拒绝时只该试 3 次，实际提交了 %d 次", server.submitted)
+	}
+	if err == nil || !strings.Contains(err.Error(), "连续 3 次") {
+		t.Errorf("连续被拒 3 次应当停下并说明原因，实际返回 %v", err)
 	}
 }
 

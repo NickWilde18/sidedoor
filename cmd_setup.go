@@ -307,7 +307,6 @@ func (c *credentials) remember(field adapter.OpenConnectAuthFormField, value str
 // 这样不用猜服务器要填哪些字段：认证组下拉框、以后可能加的二次验证都走同一条路。
 // 连上就说明凭据有效，随即断开；后台服务启动时再用保存的凭据重新登录。
 func login(cfg *Config, in *bufio.Reader) (credentials, *adapter.OpenConnectTunnelInfo, error) {
-	var creds credentials
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	instance, err := newBox(ctx, map[string]any{
@@ -316,18 +315,37 @@ func login(cfg *Config, in *bufio.Reader) (credentials, *adapter.OpenConnectTunn
 		"endpoints": []any{endpointOptions(cfg, "")},
 	})
 	if err != nil {
-		return creds, nil, err
+		return credentials{}, nil, err
 	}
 	defer instance.Close()
 	if err := instance.Start(); err != nil {
-		return creds, nil, err
+		return credentials{}, nil, err
 	}
 	ep, err := vpnEndpoint(instance)
 	if err != nil {
-		return creds, nil, err
+		return credentials{}, nil, err
 	}
+	return answerLogin(ctx, ep, in)
+}
 
+// authEndpoint 是 answerLogin 用到的那几个 VPN 端点的方法，测试里换成假的服务器。
+type authEndpoint interface {
+	OpenConnectStatus() adapter.OpenConnectStatus
+	StatusUpdated() <-chan struct{}
+	CompleteAuthChallenge(challengeID string, response adapter.OpenConnectAuthResponse) error
+	CancelAuthChallenge(challengeID string) error
+}
+
+// maxRejected 是 setup 里登录连续被拒多少次就停下。学校账号连续输错会被锁，后台服务的
+// 密码被拒时也是为此不再重试。
+const maxRejected = 3
+
+// answerLogin 把服务器发来的每一份登录表单问用户、提交回去，直到隧道连上。服务器每拒绝
+// 一次，就带着错误重发一份表单；被拒满 maxRejected 次就不再问。
+func answerLogin(ctx context.Context, ep authEndpoint, in *bufio.Reader) (credentials, *adapter.OpenConnectTunnelInfo, error) {
+	var creds credentials
 	answered, seen := map[string]bool{}, map[string]bool{}
+	rejected := 0
 	for {
 		updated := ep.StatusUpdated()
 		st := ep.OpenConnectStatus()
@@ -342,6 +360,14 @@ func login(cfg *Config, in *bufio.Reader) (credentials, *adapter.OpenConnectTunn
 				break
 			}
 			answered[ch.ID] = true
+			// 一次 setup 里被拒之间不会夹着登录成功（成功就结束了），所以累计次数就是服务器那边
+			// 连续失败的次数；中间夹着不带错误的表单（比如单独问组的那一轮）也不清零。
+			if ch.Error != "" {
+				if rejected++; rejected >= maxRejected {
+					_ = ep.CancelAuthChallenge(ch.ID)
+					return creds, nil, fmt.Errorf("登录连续 %d 次被拒（服务器说：%s），先停下，免得账号被锁；确认用户名和密码后再运行 sidedoor setup", rejected, ch.Error)
+				}
+			}
 			values, err := askChallenge(ch, in, &creds, seen)
 			if err != nil {
 				_ = ep.CancelAuthChallenge(ch.ID)
