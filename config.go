@@ -41,13 +41,16 @@ const (
 	keyringService = "sidedoor"
 )
 
+// systemConfigDir 是 tun 模式的配置目录。测试里会换成临时目录。
+var systemConfigDir = "/Library/Application Support/sidedoor"
+
 // configDir 返回配置目录。
 //
 // tun 模式的服务以 root 身份运行，配置放在系统目录，让 root 进程和普通用户的
 // sidedoor status 都能找到；其余模式放在当前用户的 ~/.config 下。
 func configDir(root bool) string {
 	if root {
-		return "/Library/Application Support/sidedoor"
+		return systemConfigDir
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "sidedoor")
@@ -72,6 +75,10 @@ func findConfig() (string, *Config, error) {
 		cfg, err := loadConfig(path)
 		if err == nil {
 			return path, cfg, nil
+		}
+		// tun 模式的配置只有 root 能读：普通用户读到这里报的权限错误，意思就是要加 sudo。
+		if errors.Is(err, fs.ErrPermission) && dir == configDir(true) && os.Geteuid() != 0 {
+			return "", nil, errNeedSudo()
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", nil, err

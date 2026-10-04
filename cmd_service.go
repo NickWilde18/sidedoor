@@ -485,7 +485,12 @@ func waitHTTP(url string, timeout time.Duration) bool {
 // requireRoot 拦住用普通身份操作 tun 模式服务的情况：系统级任务只有 root 能动。
 func requireRoot(cfg *Config) error {
 	if cfg.Mode == ModeTUN && os.Geteuid() != 0 {
-		return errors.New("tun 模式的服务是用 sudo 装的，这个操作也要加 sudo")
+		return errNeedSudo()
 	}
 	return nil
+}
+
+// errNeedSudo 提示加 sudo，并给出要重新运行的完整命令。
+func errNeedSudo() error {
+	return fmt.Errorf("tun 模式的服务是用 sudo 装的，这个操作也要加 sudo：sudo sidedoor %s", strings.Join(os.Args[1:], " "))
 }
