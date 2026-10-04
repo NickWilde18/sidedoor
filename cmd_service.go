@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -129,6 +130,12 @@ func cmdRun(args []string) error {
 	password, err := cfg.password()
 	if err != nil {
 		return err
+	}
+	// 调试接口开不起来不影响隧道和分流，记一行日志接着跑。
+	if closeDebug, err := serveDebug(debugSocketPath(path)); err != nil {
+		log.Printf("调试接口没开起来: %v", err)
+	} else {
+		defer closeDebug()
 	}
 	// launchd 停止任务时发 SIGTERM，前台运行时是 Ctrl-C，都要走到 sing-box 的 Close，
 	// 它会撤掉系统代理和路由。
@@ -388,7 +395,7 @@ func cmdUninstall() error {
 	}
 	done("已删除保存的密码（%s）", passwordPlace(cfg))
 	dir := filepath.Dir(path)
-	for _, name := range []string{"config.json", "status.json", "cache.db"} {
+	for _, name := range []string{"config.json", "status.json", "cache.db", "debug.sock"} {
 		_ = os.Remove(filepath.Join(dir, name))
 	}
 	_ = os.RemoveAll(filepath.Join(dir, "ui"))

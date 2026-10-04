@@ -22,6 +22,7 @@ sidedoor status       # 隧道状态、流量、当前走 VPN 的连接
 sidedoor dashboard    # 网页面板：实时流量和每一条连接
 sidedoor stop / start / restart
 sidedoor uninstall    # 卸载服务，删掉配置和保存的密码
+sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 goroutine 的栈，不用重启它
 ```
 
 `setup` 分五步，每一步做了什么、改了哪些文件和系统设置都会打出来：
@@ -101,6 +102,7 @@ sidedoor 状态
 | 日志 | `~/Library/Logs/sidedoor/com.nickwilde.sidedoor.err.log`；tun 模式在 `/Library/Logs/sidedoor/`。超过 10 MB 时只保留最后 1 MB |
 | 后台任务 | `~/Library/LaunchAgents/com.nickwilde.sidedoor.plist`；tun 模式在 `/Library/LaunchDaemons/` |
 | 网页面板文件 | 配置目录下的 `ui/` |
+| 调试接口（pprof） | 配置目录下的 `debug.sock`，只有你能读写；tun 模式要 sudo。`sidedoor debug heap -o 文件` 导出 heap profile |
 
 ## 限制
 

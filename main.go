@@ -19,6 +19,8 @@ const usage = `sidedoor —— 只让指定域名走 VPN，其余流量照常直
   sidedoor start | stop | restart
                        启动、停止、重启后台服务
   sidedoor uninstall   卸载后台服务，删除配置和保存的密码
+  sidedoor debug goroutines [-o 文件] | heap -o 文件
+                       导出后台服务的 goroutine 栈或 heap profile，不用重启它
   sidedoor run [-config 路径] [-v]
                        在前台运行（后台服务就是这样启动的）
 
@@ -48,6 +50,8 @@ func main() {
 		err = cmdControl(os.Args[1])
 	case "uninstall":
 		err = cmdUninstall()
+	case "debug":
+		err = cmdDebug(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
