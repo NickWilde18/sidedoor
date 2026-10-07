@@ -42,9 +42,6 @@ const (
 	keyringService = "sidedoor"
 )
 
-// systemConfigDir 是 tun 模式的配置目录。测试里会换成临时目录。
-var systemConfigDir = "/Library/Application Support/sidedoor"
-
 // configDir 返回配置目录。
 //
 // tun 模式的服务以 root 身份运行，配置放在系统目录，让 root 进程和普通用户的
@@ -53,8 +50,7 @@ func configDir(root bool) string {
 	if root {
 		return systemConfigDir
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "sidedoor")
+	return userConfigDir()
 }
 
 // configCandidates 是查找配置文件的目录，按先后顺序排列。
@@ -155,28 +151,32 @@ func (c *Config) keyringAccount() string {
 	return c.Username + "@" + c.Server
 }
 
-// passwordFile 是 tun 模式存密码的文件。
+// passwordFile 是不用钥匙串时存密码的文件，放在配置目录里，只有本人能读。
 //
-// 普通模式的密码放在当前用户的钥匙串里。tun 模式的服务以 root 身份开机就运行，
+// macOS 上普通模式的密码放在当前用户的钥匙串里。tun 模式的服务以 root 身份开机就运行，
 // 那时用户还没登录，读不到用户的钥匙串；而 macOS 的 sudo 会保留 HOME，sudo setup
 // 时写进去的又会落到用户的钥匙串里，两边对不上。所以 tun 模式改存成只有 root
-// 能读的文件。
-func passwordFile() string {
-	return filepath.Join(configDir(true), "password")
+// 能读的文件。Linux 上一律存文件，见 useKeychain。
+func passwordFile(c *Config) string {
+	return filepath.Join(configDir(c.Mode == ModeTUN), "password")
 }
 
 func (c *Config) savePassword(pw string) error {
-	if c.Mode == ModeTUN {
-		return os.WriteFile(passwordFile(), []byte(pw), 0o600)
+	if !useKeychain(c) {
+		return os.WriteFile(passwordFile(c), []byte(pw), 0o600)
 	}
 	return keyring.Set(keyringService, c.keyringAccount(), pw)
 }
 
 func (c *Config) password() (string, error) {
-	if c.Mode == ModeTUN {
-		pw, err := os.ReadFile(passwordFile())
+	if !useKeychain(c) {
+		pw, err := os.ReadFile(passwordFile(c))
 		if err != nil {
-			return "", fmt.Errorf("读不到密码，重新运行 sudo sidedoor setup -mode tun: %w", err)
+			setup := "sidedoor setup"
+			if c.Mode == ModeTUN {
+				setup = "sudo sidedoor setup -mode tun"
+			}
+			return "", fmt.Errorf("读不到密码，重新运行 %s: %w", setup, err)
 		}
 		return string(pw), nil
 	}
@@ -189,15 +189,18 @@ func (c *Config) password() (string, error) {
 
 // passwordPlace 用一句话说明密码存在哪，setup 和 uninstall 都会告诉用户。
 func passwordPlace(c *Config) string {
-	if c.Mode == ModeTUN {
-		return "只有 root 能读的文件 " + passwordFile()
+	if !useKeychain(c) {
+		if c.Mode == ModeTUN {
+			return "只有 root 能读的文件 " + passwordFile(c)
+		}
+		return "只有你能读的文件 " + passwordFile(c)
 	}
 	return fmt.Sprintf("系统钥匙串，服务 %s，账户 %s", keyringService, c.keyringAccount())
 }
 
 func (c *Config) deletePassword() error {
-	if c.Mode == ModeTUN {
-		if err := os.Remove(passwordFile()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if !useKeychain(c) {
+		if err := os.Remove(passwordFile(c)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil

@@ -113,7 +113,7 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 func echoOn(t *testing.T, tty *os.File) bool {
 	t.Helper()
-	termios, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA)
+	termios, err := unix.IoctlGetTermios(int(tty.Fd()), ioctlReadTermios)
 	if err != nil {
 		t.Fatal(err)
 	}

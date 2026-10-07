@@ -11,10 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -24,58 +22,31 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 )
 
-// serviceName 是 launchd 任务的标签，也是 plist 和日志的文件名。
-const serviceName = "com.nickwilde.sidedoor"
-
-// newService 描述后台服务。tun 模式要建网卡，只能是 root 的系统级任务
-// （/Library/LaunchDaemons）；其余模式是当前用户的 LaunchAgent，登录后自动启动。
-// 进程退出后 launchd 会自动拉起（KeepAlive），断线重连由 sing-box 自己负责。
+// newService 描述后台服务。服务怎么装、装在哪，见各平台的 serviceOptions。
 func newService(cfg *Config, cfgPath string) (service.Service, error) {
 	return service.New(noop{}, &service.Config{
 		Name:        serviceName,
 		DisplayName: "sidedoor",
 		Description: "只让指定域名走 VPN，其余流量照常直连",
 		Arguments:   []string{"run", "-config", cfgPath},
-		Option: service.KeyValue{
-			"UserService":  cfg.Mode != ModeTUN,
-			"RunAtLoad":    true,
-			"KeepAlive":    true,
-			"LogOutput":    true,
-			"LogDirectory": logDir(cfg.Mode == ModeTUN),
-		},
+		Option:      serviceOptions(cfg),
 	})
 }
 
-// noop 满足 service.Interface。launchd 直接执行 sidedoor run，用不到它的回调。
+// noop 满足 service.Interface。launchd 和 systemd 直接执行 sidedoor run，用不到它的回调。
 type noop struct{}
 
 func (noop) Start(service.Service) error { return nil }
 func (noop) Stop(service.Service) error  { return nil }
-
-func logDir(root bool) string {
-	if root {
-		return "/Library/Logs/sidedoor"
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Logs", "sidedoor")
-}
 
 // logFile 是后台服务的日志。sing-box 和 sidedoor 自己都写 stderr，所以都在 .err.log 里。
 func logFile(cfg *Config) string {
 	return filepath.Join(logDir(cfg.Mode == ModeTUN), serviceName+".err.log")
 }
 
-func plistPath(cfg *Config) string {
-	if cfg.Mode == ModeTUN {
-		return "/Library/LaunchDaemons/" + serviceName + ".plist"
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
-}
-
 // installService 装好并启动后台服务。重复 setup 时先卸掉旧的再装，保证幂等。
 func installService(cfg *Config, cfgPath string) error {
-	// launchd 任务里记的是当前可执行文件的路径。go run 的临时文件过后就被删了，
+	// 后台服务里记的是当前可执行文件的路径。go run 的临时文件过后就被删了，
 	// 装上的任务会起不来。
 	if exe, err := os.Executable(); err == nil && strings.Contains(exe, "go-build") {
 		return errors.New("当前是 go run 的临时二进制，先 make install，再用装好的 sidedoor setup")
@@ -84,7 +55,7 @@ func installService(cfg *Config, cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	// launchd 不会替我们建日志目录，目录不存在时任务直接起不来。
+	// launchd 和 systemd 都不会替我们建日志目录，目录不存在时服务直接起不来。
 	if err := os.MkdirAll(logDir(cfg.Mode == ModeTUN), 0o755); err != nil {
 		return err
 	}
@@ -137,7 +108,7 @@ func cmdRun(args []string) error {
 	} else {
 		defer closeDebug()
 	}
-	// launchd 停止任务时发 SIGTERM，前台运行时是 Ctrl-C，都要走到 sing-box 的 Close，
+	// launchd 和 systemd 停止服务时发 SIGTERM，前台运行时是 Ctrl-C，都要走到 sing-box 的 Close，
 	// 它会撤掉系统代理和路由。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -387,13 +358,13 @@ func cmdUninstall() error {
 	if err := s.Uninstall(); err != nil {
 		return fmt.Errorf("卸载后台服务: %w", err)
 	}
-	done("后台服务已停止并卸载（删除了 %s）", plistPath(cfg))
+	done("后台服务已停止并卸载（删除了 %s）", serviceFile(cfg))
 	if cfg.Mode == ModeSystem {
 		reportProxyRestored(cfg.Listen)
 	}
 	if cfg.Mode == ModeTUN {
 		tunDown(cfg)
-		done("已删除 /etc/resolver 下 sidedoor 写的分流 DNS 文件")
+		done("%s", tunCleanupText())
 	}
 	if err := cfg.deletePassword(); err != nil {
 		return fmt.Errorf("删除保存的密码: %w", err)
@@ -453,12 +424,16 @@ func cmdDashboard() error {
 
 	s.next("在浏览器里打开")
 	// tun 模式是 sudo 运行的，不替 root 开浏览器，只把地址给出来。
-	if runtime.GOOS == "darwin" && os.Geteuid() != 0 && exec.Command("open", dashboardURL(cfg)).Run() == nil {
+	host, port, _ := net.SplitHostPort(cfg.API)
+	if os.Geteuid() != 0 && openBrowser(dashboardURL(cfg)) == nil {
 		done("已在浏览器里打开，面板会自动连上 sidedoor")
 	} else {
 		note("请在浏览器里打开 %s", dashboardURL(cfg))
+		// 状态接口只监听这台机器的 127.0.0.1，经 SSH 登录的话，得先把端口转到自己电脑上。
+		if os.Getenv("SSH_CONNECTION") != "" {
+			note("你是经 SSH 登录的：先在自己电脑上运行 ssh -N -L %s:%s <这台机器>，再在自己电脑的浏览器里打开上面的地址", port, cfg.API)
+		}
 	}
-	host, port, _ := net.SplitHostPort(cfg.API)
 	note("如果面板还停在「Connect to a backend」，手动填：")
 	note("  Host %s，Port %s，Secret %s", host, port, cfg.APISecret)
 	note("列表里的 127.0.0.1:9090 是面板自带的默认值，连不上，可以删掉。")

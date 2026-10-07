@@ -17,16 +17,35 @@ const (
 	resolverMarker = "# sidedoor 生成，停止时删除"
 )
 
-// tunUp 做 tun 模式在 sing-box 之外的两件事：
-//
-//  1. 确认假 IP 段没被别的网卡接管。被占就不启动，不去抢。
-//  2. 在 /etc/resolver 下为每个域名后缀写一份分流 DNS。macOS 只会把这些域名的
-//     查询发给我们的网卡，其余域名的 DNS 设置一概不动。
-func tunUp(cfg *Config) error {
+// tunInbound 是 tun 模式的虚拟网卡：sing-box 自己加路由，只接管假 IP 段，不碰默认路由。
+func tunInbound() map[string]any {
+	return map[string]any{
+		"type":          "tun",
+		"tag":           "tun-in",
+		"address":       []string{tunAddress},
+		"auto_route":    true,
+		"route_address": []string{fakeIPRange},
+	}
+}
+
+// tunPreflight 确认假 IP 段没被别的网卡接管。被占就不启动，不去抢。
+func tunPreflight(*Config) error {
 	if out, err := exec.Command("route", "-n", "get", fakeIPProbe).Output(); err == nil {
 		if owner, taken := routeConflict(out); taken {
 			return fmt.Errorf("假 IP 段 %s 已被 %s 接管，tun 模式不去抢它", fakeIPRange, owner)
 		}
+	}
+	return nil
+}
+
+// tunUp 做 tun 模式在 sing-box 之外的两件事：
+//
+//  1. 确认假 IP 段没被别的网卡接管，见 tunPreflight。
+//  2. 在 /etc/resolver 下为每个域名后缀写一份分流 DNS。macOS 只会把这些域名的
+//     查询发给我们的网卡，其余域名的 DNS 设置一概不动。
+func tunUp(cfg *Config) error {
+	if err := tunPreflight(cfg); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(resolverDir, 0o755); err != nil {
 		return err
@@ -43,6 +62,12 @@ func tunUp(cfg *Config) error {
 	}
 	return nil
 }
+
+// tunStarted 在虚拟网卡建好之后调用。macOS 上该做的 tunUp 和 sing-box 都做了。
+func tunStarted(*Config) error { return nil }
+
+// tunCleanupText 是卸载时对 tunDown 做了什么的说明。
+func tunCleanupText() string { return "已删除 /etc/resolver 下 sidedoor 写的分流 DNS 文件" }
 
 // tunDown 删掉 tunUp 写的分流 DNS 文件。只删带自己标记的，别人的不碰。
 func tunDown(cfg *Config) {

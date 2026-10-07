@@ -183,14 +183,7 @@ func addTUN(options map[string]any, cfg *Config, serverHost string) {
 		map[string]any{"domain_suffix": cfg.Domains, "query_type": []string{"AAAA"}, "action": "predefined", "rcode": "NOERROR"},
 		map[string]any{"domain_suffix": cfg.Domains, "server": "fakeip"},
 	}
-	options["inbounds"] = append(options["inbounds"].([]any), map[string]any{
-		"type":       "tun",
-		"tag":        "tun-in",
-		"address":    []string{tunAddress},
-		"auto_route": true,
-		// 只接管假 IP 段，不碰默认路由。
-		"route_address": []string{fakeIPRange},
-	})
+	options["inbounds"] = append(options["inbounds"].([]any), tunInbound())
 	route := options["route"].(map[string]any)
 	route["rules"] = append([]any{
 		map[string]any{"inbound": "tun-in", "port": 53, "action": "hijack-dns"},
@@ -239,7 +232,7 @@ func parseOptions(ctx context.Context, options map[string]any) (context.Context,
 	if err != nil {
 		return nil, option.Options{}, fmt.Errorf("生成的 sing-box 配置有误: %w", err)
 	}
-	// sing-box 只在写日志文件时才关颜色。后台服务的日志写到 stderr、由 launchd 存进文件，
+	// sing-box 只在写日志文件时才关颜色。后台服务的日志写到 stderr、由 launchd 或 systemd 存进文件，
 	// 颜色码就跟着进了日志；stderr 不是终端时关掉，前台在终端里跑时照旧有颜色。
 	if parsed.Log != nil {
 		parsed.Log.DisableColor = !colorErr
@@ -284,7 +277,7 @@ var (
 )
 
 // trimLog 在日志超过 logLimit 时只保留最后 logKeep 字节，从一整行开始。
-// launchd 以追加方式打开日志，截短之后新内容会接着写在末尾。
+// launchd 和 systemd（StandardError=append:）都以追加方式打开日志，截短之后新内容会接着写在末尾。
 func trimLog(path string) error {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() <= logLimit {
@@ -315,7 +308,7 @@ func statusPath(cfgPath string) string {
 }
 
 // terminalRetry 是隧道进入不可恢复的错误后，进程主动退出前等待的时间。退出后由
-// launchd 重新拉起，相当于每隔这么久从头重试一次；间隔拉长，免得反复打扰服务器。
+// launchd 或 systemd 重新拉起，相当于每隔这么久从头重试一次；间隔拉长，免得反复打扰服务器。
 const terminalRetry = 5 * time.Minute
 
 // runEngine 启动 sing-box 并一直跑到 ctx 取消。隧道状态每变一次就记一行日志、
@@ -340,6 +333,11 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 	instance.Router().AppendTracker(counted)
 	if err := instance.Start(); err != nil {
 		return err
+	}
+	if cfg.Mode == ModeTUN {
+		if err := tunStarted(cfg); err != nil {
+			return err
+		}
 	}
 	ep, err := vpnEndpoint(instance)
 	if err != nil {

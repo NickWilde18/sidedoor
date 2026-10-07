@@ -9,10 +9,8 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,8 +33,8 @@ func cmdSetup(args []string) error {
 	switch {
 	case *mode != "" && *mode != ModeProxy && *mode != ModeSystem && *mode != ModeTUN:
 		return fmt.Errorf("没有 %q 这种模式，可选 proxy、system、tun", *mode)
-	case *mode == ModeTUN && runtime.GOOS != "darwin":
-		return errors.New("tun 模式目前只支持 macOS")
+	case *mode != "" && modeUnsupported(*mode) != "":
+		return errors.New(modeUnsupported(*mode))
 	case *mode == ModeTUN && !root:
 		return errors.New("tun 模式要建虚拟网卡，请用 sudo sidedoor setup -mode tun")
 	case *mode != ModeTUN && root:
@@ -89,6 +87,13 @@ func cmdSetup(args []string) error {
 		done("本地端口空闲：%s（代理）、%s（状态接口）、%s（叠加层）", cfg.Listen, cfg.API, cfg.Overlay)
 	} else {
 		done("本地端口空闲：%s（代理）、%s（状态接口）", cfg.Listen, cfg.API)
+	}
+	// tun 模式的系统条件在这里先查一遍，免得装好服务才在日志里报错。
+	if cfg.Mode == ModeTUN {
+		if err := tunPreflight(cfg); err != nil {
+			return err
+		}
+		done("可以建虚拟网卡：假 IP 段 %s 没被占用，分流 DNS 能用", fakeIPRange)
 	}
 
 	s.next("选择模式")
@@ -167,8 +172,8 @@ func cmdSetup(args []string) error {
 		return err
 	}
 	replaced.Store(true)
-	done("后台服务已安装：%s", plistPath(cfg))
-	note("登录系统后自动启动；进程意外退出时 launchd 会自动把它拉起来")
+	done("后台服务已安装：%s", serviceFile(cfg))
+	serviceNote(cfg)
 	done("后台服务已启动，等它连上隧道……")
 	reportTunnel(path, cfg, since)
 
@@ -282,16 +287,25 @@ func prefixesText(info *adapter.OpenConnectTunnelInfo) string {
 // owner 是当前占着系统代理的地址，没人占时为空。
 func askMode(in *bufio.Reader, listen, owner string) (string, error) {
 	recommended := ModeSystem
-	if owner != "" {
+	switch {
+	case modeUnsupported(ModeSystem) != "":
+		note("推荐 proxy；要让所有程序（包括不认代理设置的命令行程序）都能直接访问学校域名，用 tun。")
+		recommended = ModeProxy
+	case owner != "":
 		note("检测到系统代理已被别的工具占用（%s）。选 system 会覆盖它，两个工具会来回抢，所以推荐 proxy。", owner)
 		recommended = ModeProxy
-	} else {
+	default:
 		note("检测到系统代理没有被占用，推荐 system。")
 	}
-	choices := []adapter.OpenConnectAuthFormChoice{
+	var choices []adapter.OpenConnectAuthFormChoice
+	for _, c := range []adapter.OpenConnectAuthFormChoice{
 		{Value: ModeProxy, Label: "proxy   只开本地代理 " + listen + "，不改任何系统设置；要在你自己的代理工具里把学校域名转发过来"},
 		{Value: ModeSystem, Label: "system  另外把系统代理指向它，浏览器直接生效；会修改系统代理设置，停止服务时自动还原"},
 		{Value: ModeTUN, Label: "tun     虚拟网卡，所有应用都生效；需要 sudo"},
+	} {
+		if modeUnsupported(c.Value) == "" {
+			choices = append(choices, c)
+		}
 	}
 	m, err := askChoice(in, "可选的模式（* 是推荐项）", choices, recommended)
 	if err != nil {
@@ -551,17 +565,6 @@ func systemProxyOwner(listen string) string {
 func systemProxyIs(listen string) bool {
 	m, ok := systemProxySettings()
 	return ok && proxyIs(m, listen)
-}
-
-func systemProxySettings() (map[string]string, bool) {
-	if runtime.GOOS != "darwin" {
-		return nil, false
-	}
-	out, err := exec.Command("scutil", "--proxy").Output()
-	if err != nil {
-		return nil, false
-	}
-	return parseScutil(out), true
 }
 
 // parseScutil 解析 scutil --proxy 的输出，只取顶层的「键 : 值」行。
