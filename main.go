@@ -27,8 +27,8 @@ const usage = `sidedoor —— 只让指定域名走 VPN，其余流量照常直
 
 模式:
   proxy   只开本地代理（SOCKS5 和 HTTP 共用一个端口），分流交给你已有的代理工具
-  system  本地代理加系统代理，浏览器等遵守系统代理的应用直接生效
-  tun     虚拟网卡，所有应用都生效；需要 sudo，目前只支持 macOS
+  system  本地代理加系统代理，浏览器等遵守系统代理的应用直接生效；目前只有 macOS
+  tun     虚拟网卡，所有应用都生效；需要 sudo，macOS 和 Linux（要有 systemd-resolved）
 `
 
 func main() {

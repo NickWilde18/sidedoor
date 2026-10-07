@@ -14,6 +14,19 @@ make install          # 装到 $(go env GOPATH)/bin/sidedoor
 
 必须用 `make`：sing-box 的用户态协议栈放在 `with_gvisor` 编译标签后面，直接 `go build` 编出来的二进制启动时会报错；make 还会给 sing-box 打上 `patches/` 里的补丁（见[开发](#开发)）。
 
+### Linux
+
+Linux 机器上不用装 Go：在装了 Go 的电脑上运行 `make linux`，把 `dist/sidedoor-linux-amd64`（ARM 机器用 `arm64`）拷过去装上：
+
+```sh
+install -m 755 sidedoor-linux-amd64 ~/.local/bin/sidedoor           # proxy 模式
+sudo install -m 755 sidedoor-linux-amd64 /usr/local/bin/sidedoor    # tun 模式
+```
+
+tun 模式的服务以 root 身份运行，程序要放在只有 root 能改的地方：放在你的家目录里，能以你的身份运行的程序都能把它换掉，下次启动时就拿到了 root 权限。
+
+Linux 上目前只有 proxy 和 tun 两种模式，在 Ubuntu 26.04（systemd 259，没有图形界面）上测过。后台服务是 systemd 服务：proxy 模式装成你的用户服务，tun 模式装成系统服务。用户服务默认只在你登录期间运行，在没人登录的服务器上要给你的用户开 linger（`sudo loginctl enable-linger 你的用户名`），setup 会检查并提示。
+
 ## 使用
 
 ```sh
@@ -43,10 +56,10 @@ sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 g
 | 模式 | 做什么 | 谁生效 | 权限 |
 |---|---|---|---|
 | `proxy` | 只开本地代理 `127.0.0.1:11080`，SOCKS5 和 HTTP 共用一个端口，不改任何系统设置 | 你自己指向它的应用或代理工具 | 普通用户 |
-| `system` | 本地代理，外加把系统代理指向它；停止服务时自动还原 | 浏览器，以及遵守系统代理的应用 | 普通用户 |
-| `tun` | 虚拟网卡，只接管要走 VPN 的域名 | 所有应用，包括 ssh | `sudo`，目前只支持 macOS |
+| `system` | 本地代理，外加把系统代理指向它；停止服务时自动还原 | 浏览器，以及遵守系统代理的应用 | 普通用户；目前只有 macOS |
+| `tun` | 虚拟网卡，只接管要走 VPN 的域名 | 所有应用，包括 ssh 和不认代理设置的命令行程序 | `sudo`；macOS 和 Linux（Linux 上要有 systemd-resolved） |
 
-系统代理已经被别的工具占着（比如 Shadowrocket、Clash）时推荐 `proxy`，否则推荐 `system`。不想交互的话可以直接指定，比如 `sidedoor setup -mode proxy`，tun 模式要用 `sudo sidedoor setup -mode tun`。
+系统代理已经被别的工具占着（比如 Shadowrocket、Clash）时推荐 `proxy`，否则推荐 `system`；Linux 上推荐 `proxy`。不想交互的话可以直接指定，比如 `sidedoor setup -mode proxy`，tun 模式要用 `sudo sidedoor setup -mode tun`。
 
 ### 已经在用代理工具（proxy 模式）
 
@@ -123,19 +136,20 @@ sidedoor 状态
 - **proxy 和 system 模式不建虚拟网卡**，VPN 的 IP 包只在进程内部的用户态协议栈里流转，不改路由表，也不改系统 DNS，所以不会和别的 VPN 或 TUN 冲突。
 - **tun 模式只占一小块地址**：
   - 不接管默认路由，只把假 IP 段 `198.51.100.0/24` 和网卡自己的地址段 `192.0.2.0/30`（假 DNS `192.0.2.2` 就在这一段）路由进自己的网卡，两段都是 RFC 5737 文档保留网段。按最长前缀匹配，其他流量仍然走原来的路由。
-  - 不改系统 DNS，只为每个域名后缀写一份 `/etc/resolver/<后缀>`，macOS 只会把这些域名的查询发过来。
-  - 启动前会检查假 IP 段有没有被别的网卡接管，被接管了就拒绝启动。退出时删掉自己写的 resolver 文件，网卡和路由随进程一起消失。
+  - 不改系统 DNS。macOS 上只为每个域名后缀写一份 `/etc/resolver/<后缀>`，系统只会把这些域名的查询发过来。Linux 上网卡叫 `sidedoor0`，用 systemd-resolved 给它设路由域 `~<后缀>`、关掉 default-route，效果一样，`resolvectl status sidedoor0` 能看到；不加 `ip rule`。
+  - 启动前会检查假 IP 段有没有被别的网卡接管，被接管了就拒绝启动；Linux 上还会检查 systemd-resolved 在运行、`/etc/resolv.conf` 交给了它。退出时删掉自己写的 resolver 文件（Linux 上撤掉分流设置），网卡和路由随进程一起消失。
+  - 能和 Tailscale 共存：macOS 和 Linux 上都实测过，MagicDNS 照常解析。
   - 开启了"包含所有网络"（强制所有流量进它的隧道）的 VPN 应用和任何 TUN 都无法共存，遇到这种情况请用 proxy 模式。
-- **旧的 OpenConnect 还连着时先关掉它**：服务器上同时挂着两个会话，可能会互相踢下线。
+- **旧的 OpenConnect 还连着时先关掉它**：服务器上同时挂着两个会话，可能会互相踢下线。也有服务器允许同一个账号同时挂多个会话，这时几台机器上的 sidedoor 可以一起连着。
 
 ## 文件在哪
 
-| 内容 | 位置 |
-|---|---|
-| 配置（不含密码，含状态接口的密钥，权限 0600） | `~/.config/sidedoor/config.json`；tun 模式在 `/Library/Application Support/sidedoor/` |
-| 密码 | 系统钥匙串，服务名 `sidedoor`；tun 模式存在只有 root 能读的 `/Library/Application Support/sidedoor/password` |
-| 日志 | `~/Library/Logs/sidedoor/com.nickwilde.sidedoor.err.log`；tun 模式在 `/Library/Logs/sidedoor/`。超过 10 MB 时只保留最后 1 MB |
-| 后台任务 | `~/Library/LaunchAgents/com.nickwilde.sidedoor.plist`；tun 模式在 `/Library/LaunchDaemons/` |
+| 内容 | macOS | Linux |
+|---|---|---|
+| 配置（不含密码，含状态接口的密钥，权限 0600） | `~/.config/sidedoor/config.json`；tun 模式在 `/Library/Application Support/sidedoor/` | `~/.config/sidedoor/config.json`；tun 模式在 `/etc/sidedoor/` |
+| 密码 | 系统钥匙串，服务名 `sidedoor`；tun 模式存在只有 root 能读的 `/Library/Application Support/sidedoor/password` | 只有你能读的 `~/.config/sidedoor/password`；tun 模式是只有 root 能读的 `/etc/sidedoor/password` |
+| 日志（超过 10 MB 时只保留最后 1 MB） | `~/Library/Logs/sidedoor/com.nickwilde.sidedoor.err.log`；tun 模式在 `/Library/Logs/sidedoor/` | `~/.local/state/sidedoor/sidedoor.err.log`；tun 模式在 `/var/log/sidedoor/` |
+| 后台服务 | `~/Library/LaunchAgents/com.nickwilde.sidedoor.plist`；tun 模式在 `/Library/LaunchDaemons/` | `~/.config/systemd/user/sidedoor.service`；tun 模式是 `/etc/systemd/system/sidedoor.service` |
 | 网页面板文件 | 配置目录下的 `ui/` |
 | 叠加层文件 | 配置目录下的 `overlays/` |
 | 调试接口（pprof） | 配置目录下的 `debug.sock`，只有你能读写；tun 模式要 sudo。`sidedoor debug heap -o 文件` 导出 heap profile |
@@ -145,15 +159,26 @@ sidedoor 状态
 - 服务器要求在浏览器里登录（SSO/SAML）时，暂不支持。
 - 如果服务器每次登录都要一次性验证码，断线重连时后台没法自动填，会停下来等你重新运行 `setup`。保存的密码被拒时也一样：后台不会拿旧密码反复重试，免得把账号锁掉。
 - **system 模式下，所有遵守系统代理的应用都经过 sidedoor**，所以：
-  - sidedoor 进程意外退出到被 launchd 拉起之间（实测约 8 秒），这些应用都连不上网。
+  - sidedoor 进程意外退出到被 launchd 拉起之间，这些应用都连不上网。launchd 有时立刻拉起（实测 0.3 秒），有时要等几秒（实测约 8 秒）。
   - 直连流量的 DNS 用的是系统配置的解析器。系统解析器出问题时（比如睡眠唤醒后 Tailscale 的 MagicDNS 几分钟不回应），这些应用的连接也会跟着失败，日志里会出现大量 `context deadline exceeded`。这不是 sidedoor 本身的问题，系统里不经过代理的应用同样会受影响。
 - 经本地代理转发的 UDP（SOCKS5 UDP）没有验证过。
-- tun 模式只在真机上验证过一次（macOS，和 Tailscale 共存）。
+- tun 模式在真机上各验证过一次：macOS，以及 Ubuntu 26.04 服务器，都和 Tailscale 共存。
+- Linux 上暂时没有 system 模式：要改桌面环境的系统代理设置，还没在 Linux 桌面上验证过。
 
 ## 开发
 
 ```sh
 make test
+```
+
+Linux 上的测试在 macOS 上编成二进制，拷到 Linux 机器上跑，连同 `testdata/` 目录一起拷：
+
+```sh
+make linux-test
+scp -r dist/sidedoor-linux-amd64.test testdata 服务器:sidedoor-test/
+ssh 服务器 'cd sidedoor-test && ./sidedoor-linux-amd64.test -test.v'
+# tun 模式的集成测试要 root，用测试专用的域名，不碰真实的学校域名
+ssh -t 服务器 'cd sidedoor-test && sudo ./sidedoor-linux-amd64.test -test.run TestTunLinuxSplitDNS -test.v'
 ```
 
 sing-box 锁定在 v1.14.2。它的 Go 接口在小版本之间经常有破坏性改动，升级时先跑一遍 `make test`。
