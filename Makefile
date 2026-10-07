@@ -15,7 +15,7 @@ MODFILE := $(BUILD)/go.mod
 
 FLAGS := -tags $(TAGS) -modfile $(MODFILE) -trimpath -ldflags "-s -w"
 
-.PHONY: build install test check-singbox
+.PHONY: build install test linux linux-test check-singbox
 
 build: $(MODFILE)
 	go build $(FLAGS) -o sidedoor .
@@ -25,6 +25,18 @@ install: $(MODFILE)
 
 test: $(MODFILE)
 	go test -tags $(TAGS) -modfile $(MODFILE) ./...
+
+# Linux 版在这里交叉编译，拷到 Linux 机器上用，那边不用装 Go。
+linux: $(MODFILE)
+	@mkdir -p dist
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(FLAGS) -o dist/sidedoor-linux-amd64 .
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build $(FLAGS) -o dist/sidedoor-linux-arm64 .
+
+# Linux 上的测试也编成二进制，拷过去跑：./sidedoor-linux-amd64.test -test.v
+# tun 模式的测试要 root：sudo ./sidedoor-linux-amd64.test -test.run TestTunLinux -test.v
+linux-test: $(MODFILE)
+	@mkdir -p dist
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -tags $(TAGS) -modfile $(MODFILE) -o dist/sidedoor-linux-amd64.test .
 
 check-singbox:
 	@if [ "$(SINGBOX_VERSION)" != "$(PATCHED_SINGBOX)" ]; then \

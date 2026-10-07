@@ -46,6 +46,9 @@ func testConfig(t *testing.T, mode string) *Config {
 // 不启动：系统代理、虚拟网卡和面板下载都要到 Start 才会动，测试不会改到本机设置。
 func TestOptionsAccepted(t *testing.T) {
 	for _, mode := range []string{ModeProxy, ModeSystem, ModeTUN} {
+		if modeUnsupported(mode) != "" {
+			continue
+		}
 		for _, extras := range []struct{ dashboard, overlay bool }{{false, false}, {true, false}, {false, true}} {
 			cfg := testConfig(t, mode)
 			cfg.Dashboard = extras.dashboard

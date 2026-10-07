@@ -174,6 +174,9 @@ func TestLoginStopsAfterRepeatedRejections(t *testing.T) {
 
 // TestAskMode 确认模式一定会问，而且推荐项跟着系统代理的状况走。
 func TestAskMode(t *testing.T) {
+	if modeUnsupported(ModeSystem) != "" {
+		t.Skip("这个系统没有 system 模式，见 TestAskModeWithoutSystem")
+	}
 	cases := []struct {
 		name, owner, input, want string
 		wantErr                  bool
@@ -185,6 +188,26 @@ func TestAskMode(t *testing.T) {
 	}
 	for _, c := range cases {
 		got, err := askMode(bufio.NewReader(strings.NewReader(c.input)), "127.0.0.1:11080", c.owner)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("%s: askMode = %q, %v；想要 %q（报错 %v）", c.name, got, err, c.want, c.wantErr)
+		}
+	}
+}
+
+// TestAskModeWithoutSystem：没有 system 模式的系统（比如 Linux）上，菜单里只有 proxy 和 tun，推荐 proxy。
+func TestAskModeWithoutSystem(t *testing.T) {
+	if modeUnsupported(ModeSystem) == "" {
+		t.Skip("这个系统有 system 模式，见 TestAskMode")
+	}
+	cases := []struct {
+		name, input, want string
+		wantErr           bool
+	}{
+		{"回车选推荐的 proxy", "\n", ModeProxy, false},
+		{"第 2 项是 tun，要求改用 sudo 重新运行", "2\n", "", true},
+	}
+	for _, c := range cases {
+		got, err := askMode(bufio.NewReader(strings.NewReader(c.input)), "127.0.0.1:11080", "")
 		if (err != nil) != c.wantErr || got != c.want {
 			t.Errorf("%s: askMode = %q, %v；想要 %q（报错 %v）", c.name, got, err, c.want, c.wantErr)
 		}
