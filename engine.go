@@ -435,6 +435,25 @@ func writeStatus(path string, rs runtimeStatus) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+// errStaleStatus 表示状态文件是一个已经不在的进程留下的。
+var errStaleStatus = errors.New("写状态的进程已经退出")
+
+// currentStatus 读后台服务正在运行的进程写的状态，sidedoor status 用它。
+//
+// 进程被 kill -9 时来不及删状态文件，launchd 和 systemd 在重新拉起它之前那几秒里报告服务
+// 还在启动；这时旧文件里的「已连接」是假的，本地代理根本没人监听。写文件的进程不在了，
+// 这份状态就不算数。
+func currentStatus(path string) (*runtimeStatus, error) {
+	rs, err := readStatus(path)
+	if err != nil {
+		return nil, err
+	}
+	if !processAlive(rs.PID) {
+		return nil, errStaleStatus
+	}
+	return rs, nil
+}
+
 func readStatus(path string) (*runtimeStatus, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

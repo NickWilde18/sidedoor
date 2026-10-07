@@ -37,3 +37,5 @@ func modeUnsupported(string) string { return "这个系统还不支持，目前�
 func systemProxySettings() (map[string]string, bool) { return nil, false }
 
 func openBrowser(string) error { return errors.New("不支持") }
+
+func processAlive(int) bool { return true }

@@ -156,8 +156,12 @@ func cmdStatus() error {
 		row("后台服务", "已停止，运行 sidedoor start")
 		return nil
 	}
-	rs, err := readStatus(statusPath(path))
-	if err != nil {
+	rs, err := currentStatus(statusPath(path))
+	switch {
+	case errors.Is(err, errStaleStatus):
+		row("后台服务", "! 进程刚退出，正在被重新拉起来，过几秒再看")
+		return nil
+	case err != nil:
 		row("后台服务", "运行中，还没写出状态，可能正在启动")
 		return nil
 	}

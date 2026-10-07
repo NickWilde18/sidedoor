@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -396,5 +397,31 @@ func TestServiceLogHasNoColor(t *testing.T) {
 		if parsed.Log.DisableColor == terminal {
 			t.Errorf("stderr 是终端：%v，DisableColor 应当是 %v，实际 %v", terminal, !terminal, parsed.Log.DisableColor)
 		}
+	}
+}
+
+// TestStatusIgnoresDeadProcess 钉住「服务进程被 kill -9 之后，status 还报告已连接」：进程来不及
+// 删状态文件，systemd（launchd 也一样）在重新拉起之前那几秒里报告服务还在启动，status 就照着
+// 旧文件显示「运行中（PID 旧的）… 已连接」，而这时本地代理根本没人监听。写状态的进程不在了，
+// 这份状态就不能算数。
+func TestStatusIgnoresDeadProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+
+	exited := exec.Command(os.Args[0], "-test.run=^$")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStatus(path, runtimeStatus{PID: exited.Process.Pid, State: adapter.OpenConnectStateConnected}); err != nil {
+		t.Fatal(err)
+	}
+	if rs, err := currentStatus(path); err == nil {
+		t.Errorf("进程 %d 已经退出，它留下的状态不该算数；实际读到 %+v", exited.Process.Pid, rs)
+	}
+
+	if err := writeStatus(path, runtimeStatus{PID: os.Getpid(), State: adapter.OpenConnectStateConnected}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := currentStatus(path); err != nil {
+		t.Errorf("进程还在时应当读到状态，实际 %v", err)
 	}
 }
