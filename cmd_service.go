@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -344,6 +345,32 @@ func reportProxyRestored(listen string) {
 	warn("系统代理还指向 %s：可以在「系统设置 → 网络 → 详细信息 → 代理」里手动关掉", listen)
 }
 
+// serviceRemover 是卸载用到的两个服务方法，测试里换成假的。
+type serviceRemover interface {
+	Stop() error
+	Uninstall() error
+}
+
+// errServiceGone 表示卸载时出了错，但服务文件已经不在了。
+var errServiceGone = errors.New("服务文件已经不在了")
+
+// uninstallService 停掉并卸掉后台服务，file 是它的服务文件。
+//
+// 服务文件已经不在了（上次卸载卸到一半，或者被手动删掉了）时，卸载多半会报错，比如
+// systemctl disable 说单元不存在。这种错不该挡住后面删密码和配置，不然 sidedoor uninstall
+// 每次都停在同一处，剩下的东西永远删不掉。服务文件还在时，失败就是失败。
+func uninstallService(s serviceRemover, file string) error {
+	_ = s.Stop()
+	err := s.Uninstall()
+	if err == nil {
+		return nil
+	}
+	if _, statErr := os.Stat(file); errors.Is(statErr, fs.ErrNotExist) {
+		return fmt.Errorf("%w：%s（卸载时报 %v）", errServiceGone, file, err)
+	}
+	return err
+}
+
 // cmdUninstall 卸载服务，删除保存的密码和配置目录里 sidedoor 自己的文件。
 // 日志留着，出了问题还能翻。
 func cmdUninstall() error {
@@ -358,11 +385,14 @@ func cmdUninstall() error {
 	if err != nil {
 		return err
 	}
-	_ = s.Stop()
-	if err := s.Uninstall(); err != nil {
-		return fmt.Errorf("卸载后台服务: %w", err)
+	switch err := uninstallService(s, serviceFile(cfg)); {
+	case errors.Is(err, errServiceGone):
+		warn("%v，接着清理剩下的", err)
+	case err != nil:
+		return fmt.Errorf("卸载后台服务失败，%s 还在: %w", serviceFile(cfg), err)
+	default:
+		done("后台服务已停止并卸载（删除了 %s）", serviceFile(cfg))
 	}
-	done("后台服务已停止并卸载（删除了 %s）", serviceFile(cfg))
 	if cfg.Mode == ModeSystem {
 		reportProxyRestored(cfg.Listen)
 	}
