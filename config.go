@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,11 +67,18 @@ func configCandidates(root bool) []string {
 }
 
 // findConfig 按 configCandidates 的顺序找配置。
+//
+// 找到的配置之外还有另一种模式留下的配置时（见 leftoverConfig），照样返回找到的这份，
+// 另外打一条警告：两份配置的后台服务抢同一个端口，只看这一份会把状态看错。
 func findConfig() (string, *Config, error) {
-	for _, dir := range configCandidates(os.Geteuid() == 0) {
+	root := os.Geteuid() == 0
+	for _, dir := range configCandidates(root) {
 		path := filepath.Join(dir, "config.json")
 		cfg, err := loadConfig(path)
 		if err == nil {
+			if other := leftoverConfig(root); other != "" && other != path {
+				warnLeftoverConfig(root, path, other)
+			}
 			return path, cfg, nil
 		}
 		// tun 模式的配置只有 root 能读：普通用户读到这里报的权限错误，意思就是要加 sudo。
@@ -82,6 +90,65 @@ func findConfig() (string, *Config, error) {
 		}
 	}
 	return "", nil, errors.New("还没有配置，先运行 sidedoor setup")
+}
+
+// leftoverConfig 返回另一种模式的配置文件路径，不存在时返回空串。
+//
+// 普通用户看系统目录里 tun 模式的配置；root 看运行 sudo 的那个用户（SUDO_USER）
+// ~/.config/sidedoor 里普通模式的配置，不是 root 自己的 HOME。只 stat 不读：tun 模式的
+// 配置只有 root 能读，普通用户也要能判断它在不在。
+func leftoverConfig(root bool) string {
+	dir := configDir(true)
+	if root {
+		if dir = sudoUserConfigDir(); dir == "" {
+			return ""
+		}
+	}
+	path := filepath.Join(dir, "config.json")
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
+}
+
+// sudoUserConfigDir 返回运行 sudo 的那个用户的普通模式配置目录，和 macOS、Linux 上
+// userConfigDir 的位置相同。不是经 sudo 运行，或者查不到这个用户时返回空串。
+func sudoUserConfigDir() string {
+	name := os.Getenv("SUDO_USER")
+	if name == "" || name == "root" {
+		return ""
+	}
+	u, err := user.Lookup(name)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(u.HomeDir, ".config", "sidedoor")
+}
+
+// leftoverConfigError 是 setup 遇到另一种模式的配置时报的错，other 为空时返回 nil。
+//
+// 两种模式的后台服务监听同一个端口，抢不到的那个在 launchd / systemd 下反复重启，开机时
+// 谁先抢到跑的就是谁。所以 setup 不在旁边再装一个，让用户先卸掉另一个。
+func leftoverConfigError(root bool, other string) error {
+	if other == "" {
+		return nil
+	}
+	if root {
+		return fmt.Errorf("%s 里还装着普通模式（proxy 或 system），它的后台服务会和 tun 模式抢同一个端口。"+
+			"先不加 sudo 运行 sidedoor uninstall 卸掉它，再运行 sudo sidedoor setup -mode tun", other)
+	}
+	return fmt.Errorf("已经装了 tun 模式（%s），它的后台服务会和新装的抢同一个端口。"+
+		"先运行 sudo sidedoor uninstall 卸掉它，再运行 sidedoor setup", other)
+}
+
+// warnLeftoverConfig 提示 findConfig 找到的 path 之外还有另一种模式的配置 other。
+func warnLeftoverConfig(root bool, path, other string) {
+	if root {
+		warn("%s 里还有一份普通模式的配置，它的后台服务会和 tun 模式抢端口；不用了的话，不加 sudo 运行 sidedoor uninstall 卸掉", other)
+		return
+	}
+	warn("下面是 %s 这份配置的状态，系统目录里还有一份 tun 模式的配置 %s。"+
+		"要看 tun 模式运行 sudo sidedoor status；这份不用了的话，运行 sidedoor uninstall 卸掉，免得它的后台服务和 tun 模式抢端口", path, other)
 }
 
 func loadConfig(path string) (*Config, error) {

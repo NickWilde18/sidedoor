@@ -40,6 +40,10 @@ func cmdSetup(args []string) error {
 	case *mode != ModeTUN && root:
 		return errors.New("只有 tun 模式需要 sudo，其他模式请直接运行 sidedoor setup")
 	}
+	// 另一种模式的配置在另一个目录里，下面的「停掉旧服务」只管本模式的目录，管不到它。
+	if err := leftoverConfigError(root, leftoverConfig(root)); err != nil {
+		return err
+	}
 	path := filepath.Join(configDir(root), "config.json")
 	prev, _ := loadConfig(path)
 	if prev == nil {
