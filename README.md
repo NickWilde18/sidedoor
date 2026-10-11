@@ -34,17 +34,23 @@ sidedoor setup        # 按提示一步步来：选模式、登录、选域名�
 sidedoor status       # 隧道状态、流量、当前走 VPN 的连接
 sidedoor dashboard    # 网页面板：实时流量和每一条连接
 sidedoor overlay      # 和别的代理软件一起用：生成导入一次就行的叠加层，见下文
-sidedoor stop / start / restart
-sidedoor uninstall    # 卸载服务，删掉配置和保存的密码
+sidedoor stop        # 撤掉代理：后台服务停掉、任务文件移除，开机和登录后都不会自己连上；配置和密码留着
+sidedoor start       # 按已有的配置连上，不用重新 setup
+sidedoor restart     # stop 再 start
+sidedoor uninstall   # stop，再删掉全部配置和保存的密码
 sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 goroutine 的栈，不用重启它
 ```
 
 输出到终端时带颜色，输出到管道或文件时不带；不想要颜色可以设 `NO_COLOR=1`。
 
-`setup` 分五步，每一步做了什么、改了哪些文件和系统设置都会打出来：
+所有命令都不用加 `sudo`。tun 模式的服务以 root 运行，碰到要管理员权限的那一步（装、停、启动、卸载 tun 模式），sidedoor 会说一声，然后在同一个终端里用 sudo 问你这台电脑的登录密码，接着做完；`status` 不用密码。反过来，加了 `sudo` 运行、操作的又是 proxy 或 system 模式时，sidedoor 会回到你自己的身份去做；直接以 root 登录、查不到是哪个用户时会让你别用 sudo 运行。
 
-1. **检查环境**：停掉正在运行的旧服务，确认端口空闲。之后要是失败或者被 Ctrl-C 打断，会把旧服务恢复回去。
-2. **选择模式**：先告诉你系统代理现在有没有被别的工具占着，再列出三种模式和各自会改什么，按情况标出推荐项。
+**同一时刻只装一种模式。** 换模式就是用新模式重新 `setup`：它先停掉原来的模式，装好新模式之后再把原来的卸掉（配置和密码一起删）；新模式没装成，就把原来的重新启动。`uninstall` 不管装的是哪种都删干净。
+
+`setup` 先让你选模式：告诉你系统代理现在有没有被别的工具占着，列出三种模式和各自会改什么，按情况标出推荐项。之后分五步，每一步做了什么、改了哪些文件和系统设置都会打出来：
+
+1. **检查环境**：停掉同一种身份下正在运行的旧服务，确认端口空闲。之后要是失败或者被 Ctrl-C 打断，会把旧服务恢复回去。
+2. **选择模式**：确认选好的模式。
 3. **登录**：把服务器发来的登录表单原样问你，比如组、用户名、密码。登录成功说明账号没问题，随即断开。连续被拒 3 次就停下，免得账号被锁。
 4. **选域名**：哪些域名走 VPN，默认是服务器的主域名，比如 `vpn.example.edu` 对应 `example.edu`。
 5. **保存并启动**：写配置、存密码、装后台服务，然后等它真正连上隧道，最后给出接下来该做什么。
@@ -57,9 +63,9 @@ sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 g
 |---|---|---|---|
 | `proxy` | 只开本地代理 `127.0.0.1:11080`，SOCKS5 和 HTTP 共用一个端口，不改任何系统设置 | 你自己指向它的应用或代理工具 | 普通用户 |
 | `system` | 本地代理，外加把系统代理指向它；停止服务时自动还原 | 浏览器，以及遵守系统代理的应用 | 普通用户；目前只有 macOS |
-| `tun` | 虚拟网卡，只接管要走 VPN 的域名 | 所有应用，包括 ssh 和不认代理设置的命令行程序 | `sudo`；macOS 和 Linux（Linux 上要有 systemd-resolved） |
+| `tun` | 虚拟网卡，只接管要走 VPN 的域名 | 所有应用，包括 ssh 和不认代理设置的命令行程序 | 管理员权限（sidedoor 会在终端里问密码）；macOS 和 Linux（Linux 上要有 systemd-resolved） |
 
-系统代理已经被别的工具占着（比如 Shadowrocket、Clash）时推荐 `proxy`，否则推荐 `system`；Linux 上推荐 `proxy`。不想交互的话可以直接指定，比如 `sidedoor setup -mode proxy`，tun 模式要用 `sudo sidedoor setup -mode tun`。
+系统代理已经被别的工具占着（比如 Shadowrocket、Clash）时推荐 `proxy`，否则推荐 `system`；Linux 上推荐 `proxy`。不想交互的话可以直接指定，比如 `sidedoor setup -mode proxy`、`sidedoor setup -mode tun`。
 
 ### 已经在用代理工具（proxy 模式）
 
@@ -146,13 +152,14 @@ sidedoor 状态
 
 | 内容 | macOS | Linux |
 |---|---|---|
-| 配置（不含密码，含状态接口的密钥，权限 0600） | `~/.config/sidedoor/config.json`；tun 模式在 `/Library/Application Support/sidedoor/` | `~/.config/sidedoor/config.json`；tun 模式在 `/etc/sidedoor/` |
+| 配置（不含密码） | `~/.config/sidedoor/config.json`，只有你能读，含状态接口的密钥；tun 模式在 `/Library/Application Support/sidedoor/`，所有人都能读、不含密钥，密钥在只有 root 能读的 `api_secret` | `~/.config/sidedoor/config.json`；tun 模式在 `/etc/sidedoor/`，同 macOS |
+| 运行状态 | 配置目录下的 `status.json`，所有人都能读：隧道状态、流量、走 VPN 的连接。`sidedoor status` 读的就是它 | 同 macOS |
 | 密码 | 系统钥匙串，服务名 `sidedoor`；tun 模式存在只有 root 能读的 `/Library/Application Support/sidedoor/password` | 只有你能读的 `~/.config/sidedoor/password`；tun 模式是只有 root 能读的 `/etc/sidedoor/password` |
 | 日志（超过 10 MB 时只保留最后 1 MB） | `~/Library/Logs/sidedoor/com.nickwilde.sidedoor.err.log`；tun 模式在 `/Library/Logs/sidedoor/` | `~/.local/state/sidedoor/sidedoor.err.log`；tun 模式在 `/var/log/sidedoor/` |
 | 后台服务 | `~/Library/LaunchAgents/com.nickwilde.sidedoor.plist`；tun 模式在 `/Library/LaunchDaemons/` | `~/.config/systemd/user/sidedoor.service`；tun 模式是 `/etc/systemd/system/sidedoor.service` |
 | 网页面板文件 | 配置目录下的 `ui/` |
 | 叠加层文件 | 配置目录下的 `overlays/` |
-| 调试接口（pprof） | 配置目录下的 `debug.sock`，只有你能读写；tun 模式要 sudo。`sidedoor debug heap -o 文件` 导出 heap profile |
+| 调试接口（pprof） | 配置目录下的 `debug.sock`，只有你能读写；tun 模式只有 root 能读写，sidedoor 会自己用 sudo。`sidedoor debug heap -o 文件` 导出 heap profile |
 
 ## 限制
 

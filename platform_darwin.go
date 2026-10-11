@@ -69,3 +69,9 @@ func systemProxySettings() (map[string]string, bool) {
 }
 
 func openBrowser(url string) error { return exec.Command("open", url).Run() }
+
+// asUserCommand 让 root 以 uid / name 这个用户的身份运行 cmd：launchctl asuser 进他的登录会话
+// （LaunchAgent 和钥匙串都在会话里），sudo -H 换成他的身份和 HOME。
+func asUserCommand(uid, name string, cmd []string) []string {
+	return append([]string{"launchctl", "asuser", uid, "sudo", "-H", "-u", name}, cmd...)
+}

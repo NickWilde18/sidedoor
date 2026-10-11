@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -93,6 +92,9 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := upgradeTunConfig(path, cfg); err != nil {
+		return err
+	}
 	// 旧版本写的配置没有状态接口的地址和密钥，补上并存盘，status 才读得到。
 	if cfg.fillDefaults() {
 		if err := cfg.save(path); err != nil {
@@ -116,54 +118,82 @@ func cmdRun(args []string) error {
 	return runEngine(ctx, cfg, path, password, *verbose)
 }
 
+// configFromFlag 读 -config 指定的配置；没指定时读当前身份这一边的。
 func configFromFlag(path string) (string, *Config, error) {
 	if path == "" {
-		return findConfig()
+		path = sideConfigPath(ownSide())
 	}
 	cfg, err := loadConfig(path)
 	return path, cfg, err
 }
 
-func cmdStatus() error {
-	path, cfg, err := findConfig()
+// cmdStatus 显示装着的模式和它的后台服务。不需要 sudo：tun 模式的 config.json 和状态文件
+// 所有人都能读，服务停没停按文件判断（见 serviceState）。用 sudo 运行时，普通模式那一边切回
+// 那个用户去显示：它的任务文件和日志在那个用户的家目录里。
+func cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	only := sideFlag(fs)
+	_ = fs.Parse(args)
+	here, err := parseSide(*only)
 	if err != nil {
 		return err
 	}
-	// 普通用户的 launchctl list 看不到 root 的系统级任务，会把运行中误报成已停止。
-	if err := requireRoot(cfg); err != nil {
-		return err
+	if here != "" {
+		return printSideStatus(here)
 	}
-	fmt.Println("sidedoor 状态")
-	account := cfg.Username
-	if cfg.Group != "" {
-		account += "，组 " + cfg.Group
+	installed := installedSides()
+	if len(installed) == 0 {
+		return errors.New("还没有配置，先运行 sidedoor setup")
 	}
-	row("服务器", fmt.Sprintf("%s（%s）", cfg.Server, account))
-	row("走 VPN", strings.Join(cfg.Domains, ", "))
-	row("模式", modeText(cfg))
+	if len(installed) > 1 {
+		warn("%v", errBothInstalled)
+	}
+	for i, s := range installed {
+		if i > 0 {
+			fmt.Println()
+		}
+		if s == sideUser && ownSide() != sideUser {
+			if err := runSwitched(s, "status", "-side", string(s)); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := printSideStatus(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	s, err := newService(cfg, path)
-	if err != nil {
+// printSideStatus 显示 s 那一边的配置和后台服务。
+func printSideStatus(s side) error {
+	path := sideConfigPath(s)
+	cfg, err := loadConfig(path)
+	if errors.Is(err, fs.ErrPermission) && s == sideTUN {
+		// 旧版本写的 tun 配置只有 root 能读，下次以 root 身份启动时会改成新格式。
+		fmt.Println("sidedoor 状态")
+		row("模式", "tun（配置是旧版本写的，只有 root 能读；运行一次 sidedoor restart 之后这里就能显示完整内容）")
+		cfg = &Config{Mode: ModeTUN}
+	} else if err != nil {
 		return err
+	} else {
+		fmt.Println("sidedoor 状态")
+		account := cfg.Username
+		if cfg.Group != "" {
+			account += "，组 " + cfg.Group
+		}
+		row("服务器", fmt.Sprintf("%s（%s）", cfg.Server, account))
+		row("走 VPN", strings.Join(cfg.Domains, ", "))
+		row("模式", modeText(cfg))
 	}
-	st, err := s.Status()
-	switch {
-	case errors.Is(err, service.ErrNotInstalled):
-		row("后台服务", "未安装，运行 sidedoor setup")
+
+	st, rs := serviceState(cfg, path)
+	switch st {
+	case stateStopped:
+		row("后台服务", "已停止，没有在代理任何流量；恢复用 sidedoor start")
 		return nil
-	case err != nil:
-		return err
-	case st != service.StatusRunning:
-		row("后台服务", "已停止，运行 sidedoor start")
-		return nil
-	}
-	rs, err := currentStatus(statusPath(path))
-	switch {
-	case errors.Is(err, errStaleStatus):
-		row("后台服务", "! 进程刚退出，正在被重新拉起来，过几秒再看")
-		return nil
-	case err != nil:
-		row("后台服务", "运行中，还没写出状态，可能正在启动")
+	case stateStarting:
+		row("后台服务", "! 正在启动，或者刚退出、正被重新拉起来，过几秒再看；一直这样就运行 sidedoor restart，还不行看日志 "+logFile(cfg))
 		return nil
 	}
 	row("后台服务", fmt.Sprintf("运行中（PID %d），已运行 %s", rs.PID, durationText(time.Since(rs.Started))))
@@ -184,8 +214,11 @@ func cmdStatus() error {
 	row("流量", "走 VPN  "+routeText(t.VPN))
 	row("", "直连    "+routeText(t.Direct))
 	row("", "（从后台服务启动时算起；速率是最近 "+statsInterval.String()+" 的平均）")
-	printVPNConnections(cfg)
+	printVPNConnections(rs)
 
+	if cfg.API == "" {
+		return nil
+	}
 	if cfg.Dashboard {
 		row("网页面板", "http://"+cfg.API+"/ui/")
 	} else {
@@ -275,62 +308,20 @@ func fetchConnections(cfg *Config) ([]apiConnection, error) {
 	return body.Connections, nil
 }
 
-// printVPNConnections 列出当前走 VPN 的连接，按传输量从大到小，最多 10 条。
-func printVPNConnections(cfg *Config) {
-	conns, err := fetchConnections(cfg)
-	if err != nil {
-		row("VPN 连接", "读不到："+err.Error())
-		return
-	}
-	var vpn []apiConnection
-	for _, c := range conns {
-		if slices.Contains(c.Chains, "vpn") {
-			vpn = append(vpn, c)
-		}
-	}
-	if len(vpn) == 0 {
+// printVPNConnections 列出后台服务写在状态文件里的走 VPN 的连接，已经按传输量从大到小排好。
+func printVPNConnections(rs *runtimeStatus) {
+	if rs.VPNCount == 0 {
 		row("VPN 连接", "当前没有")
 		return
 	}
-	slices.SortFunc(vpn, func(a, b apiConnection) int {
-		return int((b.Upload + b.Download) - (a.Upload + a.Download))
-	})
-	row("VPN 连接", fmt.Sprintf("当前 %d 条", len(vpn)))
-	for i, c := range vpn[:min(len(vpn), 10)] {
+	row("VPN 连接", fmt.Sprintf("当前 %d 条", rs.VPNCount))
+	for i, c := range rs.VPN {
 		fmt.Printf("    %2d. %-40s ↓ %-9s ↑ %-9s 持续 %s\n", i+1, c.target(),
 			bytesText(c.Download), bytesText(c.Upload), durationText(time.Since(c.Start)))
 	}
-	if len(vpn) > 10 {
-		note("还有 %d 条，完整列表看 sidedoor dashboard", len(vpn)-10)
+	if rs.VPNCount > len(rs.VPN) {
+		note("还有 %d 条，完整列表看 sidedoor dashboard", rs.VPNCount-len(rs.VPN))
 	}
-}
-
-func cmdControl(action string) error {
-	path, cfg, err := findConfig()
-	if err != nil {
-		return err
-	}
-	if err := requireRoot(cfg); err != nil {
-		return err
-	}
-	s, err := newService(cfg, path)
-	if err != nil {
-		return err
-	}
-	since := time.Now()
-	if err := service.Control(s, action); err != nil {
-		return err
-	}
-	if action == "stop" {
-		done("后台服务已停止")
-		if cfg.Mode == ModeSystem {
-			reportProxyRestored(cfg.Listen)
-		}
-		return nil
-	}
-	done("后台服务已%s，等它连上隧道……", map[string]string{"start": "启动", "restart": "重启"}[action])
-	reportTunnel(path, cfg, since)
-	return nil
 }
 
 // reportProxyRestored 确认停止服务后系统代理已经撤掉。sing-box 退出时才撤，所以等一会儿。
@@ -371,61 +362,19 @@ func uninstallService(s serviceRemover, file string) error {
 	return err
 }
 
-// cmdUninstall 卸载服务，删除保存的密码和配置目录里 sidedoor 自己的文件。
-// 日志留着，出了问题还能翻。
-func cmdUninstall() error {
-	path, cfg, err := findConfig()
-	if err != nil {
-		return err
-	}
-	if err := requireRoot(cfg); err != nil {
-		return err
-	}
-	s, err := newService(cfg, path)
-	if err != nil {
-		return err
-	}
-	switch err := uninstallService(s, serviceFile(cfg)); {
-	case errors.Is(err, errServiceGone):
-		warn("%v，接着清理剩下的", err)
-	case err != nil:
-		return fmt.Errorf("卸载后台服务失败，%s 还在: %w", serviceFile(cfg), err)
-	default:
-		done("后台服务已停止并卸载（删除了 %s）", serviceFile(cfg))
-	}
-	if cfg.Mode == ModeSystem {
-		reportProxyRestored(cfg.Listen)
-	}
-	if cfg.Mode == ModeTUN {
-		tunDown(cfg)
-		done("%s", tunCleanupText())
-	}
-	if err := cfg.deletePassword(); err != nil {
-		return fmt.Errorf("删除保存的密码: %w", err)
-	}
-	done("已删除保存的密码（%s）", passwordPlace(cfg))
-	dir := filepath.Dir(path)
-	for _, name := range []string{"config.json", "status.json", "cache.db", "debug.sock"} {
-		_ = os.Remove(filepath.Join(dir, name))
-	}
-	_ = os.RemoveAll(filepath.Join(dir, "ui"))
-	_ = os.RemoveAll(overlayDir(path))
-	_ = os.Remove(dir) // 目录里还有别的东西就留着
-	done("已删除配置 %s", dir)
-	note("日志留在 %s，不需要的话可以手动删掉", logDir(cfg.Mode == ModeTUN))
-	return nil
-}
-
 // cmdDashboard 打开网页面板。
 //
 // 面板文件第一次用时由 sing-box 从 GitHub 下载，所以默认不开：平时启动后台服务
 // 不依赖 GitHub，只有第一次运行这个命令时才去下载。
-func cmdDashboard() error {
-	path, cfg, err := findConfig()
-	if err != nil {
+func cmdDashboard(args []string) error {
+	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
+	only := sideFlag(fs)
+	_ = fs.Parse(args)
+	if switched, err := switchIfNeeded(*only); switched || err != nil {
 		return err
 	}
-	if err := requireRoot(cfg); err != nil {
+	path, cfg, err := loadSide(ownSide())
+	if err != nil {
 		return err
 	}
 	s := &steps{total: 3}
@@ -495,17 +444,4 @@ func waitHTTP(url string, timeout time.Duration) bool {
 		}
 	}
 	return false
-}
-
-// requireRoot 拦住用普通身份操作 tun 模式服务的情况：系统级任务只有 root 能动。
-func requireRoot(cfg *Config) error {
-	if cfg.Mode == ModeTUN && os.Geteuid() != 0 {
-		return errNeedSudo()
-	}
-	return nil
-}
-
-// errNeedSudo 提示加 sudo，并给出要重新运行的完整命令。
-func errNeedSudo() error {
-	return fmt.Errorf("tun 模式的服务是用 sudo 装的，这个操作也要加 sudo：sudo sidedoor %s", strings.Join(os.Args[1:], " "))
 }

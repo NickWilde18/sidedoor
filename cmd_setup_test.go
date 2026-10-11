@@ -172,7 +172,8 @@ func TestLoginStopsAfterRepeatedRejections(t *testing.T) {
 	}
 }
 
-// TestAskMode 确认模式一定会问，而且推荐项跟着系统代理的状况走。
+// TestAskMode 确认模式一定会问，而且推荐项跟着系统代理的状况走。普通用户也能直接选 tun：
+// 要管理员权限的那几步，setup 会切换到 sudo 接着做，不再让用户换成 sudo 从头重来。
 func TestAskMode(t *testing.T) {
 	if modeUnsupported(ModeSystem) != "" {
 		t.Skip("这个系统没有 system 模式，见 TestAskModeWithoutSystem")
@@ -184,7 +185,7 @@ func TestAskMode(t *testing.T) {
 		{"没人占用系统代理，回车选推荐的 system", "", "\n", ModeSystem, false},
 		{"系统代理被占用，回车选推荐的 proxy", "127.0.0.1:1082", "\n", ModeProxy, false},
 		{"手动选 proxy", "", "1\n", ModeProxy, false},
-		{"选 tun 要求改用 sudo 重新运行", "", "3\n", "", true},
+		{"不加 sudo 也能选 tun", "", "3\n", ModeTUN, false},
 	}
 	for _, c := range cases {
 		got, err := askMode(bufio.NewReader(strings.NewReader(c.input)), "127.0.0.1:11080", c.owner)
@@ -204,7 +205,7 @@ func TestAskModeWithoutSystem(t *testing.T) {
 		wantErr           bool
 	}{
 		{"回车选推荐的 proxy", "\n", ModeProxy, false},
-		{"第 2 项是 tun，要求改用 sudo 重新运行", "2\n", "", true},
+		{"第 2 项是 tun，不加 sudo 也能选", "2\n", ModeTUN, false},
 	}
 	for _, c := range cases {
 		got, err := askMode(bufio.NewReader(strings.NewReader(c.input)), "127.0.0.1:11080", "")

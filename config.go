@@ -23,14 +23,14 @@ import (
 type Config struct {
 	Server    string   `json:"server"` // VPN 服务器主机名，可带端口
 	Username  string   `json:"username"`
-	Group     string   `json:"group,omitempty"`     // 认证组；空表示用服务器默认的组
-	Domains   []string `json:"domains"`             // 走 VPN 的域名后缀
-	Listen    string   `json:"listen"`              // 本地代理的监听地址
-	Mode      string   `json:"mode"`                // proxy、system 或 tun
-	API       string   `json:"api"`                 // 本地状态接口的监听地址，连接明细和网页面板都从这里取
-	APISecret string   `json:"api_secret"`          // 状态接口的密钥，挡住本机别的程序和网页
-	Dashboard bool     `json:"dashboard,omitempty"` // 是否提供网页面板
-	Overlay   string   `json:"overlay,omitempty"`   // 叠加层专用端口的监听地址：只转发走 VPN 的域名；空表示没开
+	Group     string   `json:"group,omitempty"`      // 认证组；空表示用服务器默认的组
+	Domains   []string `json:"domains"`              // 走 VPN 的域名后缀
+	Listen    string   `json:"listen"`               // 本地代理的监听地址
+	Mode      string   `json:"mode"`                 // proxy、system 或 tun
+	API       string   `json:"api"`                  // 本地状态接口的监听地址，连接明细和网页面板都从这里取
+	APISecret string   `json:"api_secret,omitempty"` // 状态接口的密钥，挡住本机别的程序和网页；tun 模式单独存，见 save
+	Dashboard bool     `json:"dashboard,omitempty"`  // 是否提供网页面板
+	Overlay   string   `json:"overlay,omitempty"`    // 叠加层专用端口的监听地址：只转发走 VPN 的域名；空表示没开
 }
 
 const (
@@ -53,37 +53,14 @@ func configDir(root bool) string {
 	return userConfigDir()
 }
 
-// configCandidates 是查找配置文件的目录，按先后顺序排列。
-//
-// root 只看系统级配置：macOS 的 sudo 会保留 HOME，root 要是也先找 ~/.config/sidedoor，
-// sudo sidedoor uninstall 就会改到、删掉普通模式的配置。普通用户先找自己的，再找
-// 系统级的，这样 status 发现是 tun 模式时能提示加 sudo。
-func configCandidates(root bool) []string {
-	if root {
-		return []string{configDir(true)}
-	}
-	return []string{configDir(false), configDir(true)}
-}
+// tunConfigPerm 是 tun 模式 config.json 的权限：所有人都能读，普通用户的 sidedoor status 要读它。
+// 里面没有凭据，凭据见 apiSecretFile 和 passwordFile。
+const tunConfigPerm = 0o644
 
-// findConfig 按 configCandidates 的顺序找配置。
-func findConfig() (string, *Config, error) {
-	for _, dir := range configCandidates(os.Geteuid() == 0) {
-		path := filepath.Join(dir, "config.json")
-		cfg, err := loadConfig(path)
-		if err == nil {
-			return path, cfg, nil
-		}
-		// tun 模式的配置只有 root 能读：普通用户读到这里报的权限错误，意思就是要加 sudo。
-		if errors.Is(err, fs.ErrPermission) && dir == configDir(true) && os.Geteuid() != 0 {
-			return "", nil, errNeedSudo()
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", nil, err
-		}
-	}
-	return "", nil, errors.New("还没有配置，先运行 sidedoor setup")
-}
+// apiSecretFile 是 tun 模式单独存状态接口密钥的文件名，和 config.json 在同一个目录，只有 root 能读。
+const apiSecretFile = "api_secret"
 
+// loadConfig 读配置。tun 模式的密钥单独存着，读得到就合进来（只有 root 读得到）。
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -93,22 +70,43 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("解析 %s: %w", path, err)
 	}
+	if cfg.Mode == ModeTUN && cfg.APISecret == "" {
+		if secret, err := os.ReadFile(filepath.Join(filepath.Dir(path), apiSecretFile)); err == nil {
+			cfg.APISecret = strings.TrimSpace(string(secret))
+		}
+	}
 	return &cfg, nil
 }
 
+// save 写配置。
+//
+// 普通模式的 config.json 只有本人能读，状态接口的密钥就写在里面。tun 模式的 config.json 要让
+// 普通用户的 status 能读，所以是 0644、不含密钥，密钥单独写进同目录下只有 root 能读的
+// apiSecretFile。WriteFile 不会改已存在文件的权限，所以写完都再设一次。
 func (c *Config) save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	public, perm := *c, os.FileMode(0o600)
+	if c.Mode == ModeTUN {
+		secretPath := filepath.Join(dir, apiSecretFile)
+		if err := os.WriteFile(secretPath, []byte(c.APISecret+"\n"), 0o600); err != nil {
+			return err
+		}
+		if err := os.Chmod(secretPath, 0o600); err != nil {
+			return err
+		}
+		public.APISecret, perm = "", tunConfigPerm
+	}
+	data, err := json.MarshalIndent(public, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), perm); err != nil {
 		return err
 	}
-	// 里面有状态接口的密钥。WriteFile 不会改已存在文件的权限，所以再收紧一次。
-	return os.Chmod(path, 0o600)
+	return os.Chmod(path, perm)
 }
 
 // fillDefaults 给旧版本写的配置补上后来加的字段，返回是否补了东西。
@@ -172,11 +170,7 @@ func (c *Config) password() (string, error) {
 	if !useKeychain(c) {
 		pw, err := os.ReadFile(passwordFile(c))
 		if err != nil {
-			setup := "sidedoor setup"
-			if c.Mode == ModeTUN {
-				setup = "sudo sidedoor setup -mode tun"
-			}
-			return "", fmt.Errorf("读不到密码，重新运行 %s: %w", setup, err)
+			return "", fmt.Errorf("读不到密码，重新运行 sidedoor setup -mode %s: %w", c.Mode, err)
 		}
 		return string(pw), nil
 	}
