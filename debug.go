@@ -79,6 +79,7 @@ func cmdDebug(args []string) error {
 	what := args[0]
 	fs := flag.NewFlagSet("debug "+what, flag.ExitOnError)
 	out := fs.String("o", "", "写到这个文件；goroutines 不给就打到终端")
+	only := sideFlag(fs)
 	_ = fs.Parse(args[1:])
 
 	var query string
@@ -95,11 +96,11 @@ func cmdDebug(args []string) error {
 		return fmt.Errorf("不认识 %q，只能导出 goroutines 或 heap", what)
 	}
 
-	path, cfg, err := findConfig()
-	if err != nil {
+	if switched, err := switchIfNeeded(*only); switched || err != nil {
 		return err
 	}
-	if err := requireRoot(cfg); err != nil {
+	path, _, err := loadSide(ownSide())
+	if err != nil {
 		return err
 	}
 	socket := debugSocketPath(path)

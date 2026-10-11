@@ -21,41 +21,119 @@ import (
 	"golang.org/x/term"
 )
 
+// cmdSetup 登录一次并装成后台服务。加不加 sudo 都能装三种模式中的任何一种：模式定下来之后，
+// 按 planSetup 排出步骤，不归当前身份管的那一步切换身份去做（见 lifecycle.go）。同一时刻
+// 只留一种模式：另一边装着旧模式时，先停掉它，新模式装好之后再卸掉；没装成就把它重新启动。
 func cmdSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
 	server := fs.String("server", "", "VPN 服务器地址")
 	mode := fs.String("mode", "", "proxy、system 或 tun；留空时会列出来让你选")
 	domains := fs.String("domains", "", "走 VPN 的域名后缀，逗号分隔；留空时根据服务器地址推一个默认值")
 	listen := fs.String("listen", defaultListen, "本地代理的监听地址")
+	only := sideFlag(fs)
 	_ = fs.Parse(args)
 
-	root := os.Geteuid() == 0
 	switch {
 	case *mode != "" && *mode != ModeProxy && *mode != ModeSystem && *mode != ModeTUN:
 		return fmt.Errorf("没有 %q 这种模式，可选 proxy、system、tun", *mode)
 	case *mode != "" && modeUnsupported(*mode) != "":
 		return errors.New(modeUnsupported(*mode))
-	case *mode == ModeTUN && !root:
-		return errors.New("tun 模式要建虚拟网卡，请用 sudo sidedoor setup -mode tun")
-	case *mode != ModeTUN && root:
-		return errors.New("只有 tun 模式需要 sudo，其他模式请直接运行 sidedoor setup")
 	}
+	here, err := parseSide(*only)
+	if err != nil {
+		return err
+	}
+	in := bufio.NewReader(os.Stdin)
+	opts := setupOptions{server: *server, mode: *mode, domains: *domains, listen: *listen}
+	if here != "" {
+		// 切换身份之后的那个 sidedoor：模式由切换前的那个定好了，只在这一边装。
+		if sideOf(opts.mode) != here {
+			return fmt.Errorf("-side %s 装不了 %s 模式", here, opts.mode)
+		}
+		return setupHere(in, opts)
+	}
+
+	fmt.Println("sidedoor setup：登录一次 VPN，然后装成后台服务。")
+	if opts.mode == "" {
+		m, err := askMode(in, opts.listen, systemProxyOwner(opts.listen))
+		if err != nil {
+			return err
+		}
+		opts.mode = m
+	}
+	plan := planSetup(ownSide(), sideOf(opts.mode), installedSides())
+	if !plan.Install.Local {
+		// 先确认切换得过去，免得旧模式已经停了才发现装不了。
+		if _, err := switchCommand(plan.Install.Side, "sidedoor", nil); err != nil {
+			return err
+		}
+	}
+	plan.Restore = onlyRunning(plan.Restore, sideRunning)
+	if len(plan.Stop) > 0 {
+		note("这台电脑上还装着另一种模式，同一时刻只能有一种：先停掉它，新模式装好之后再卸掉")
+		if err := runSteps(plan.Stop); err != nil {
+			return err
+		}
+	}
+	if plan.Install.Local {
+		err = setupHere(in, opts)
+	} else {
+		err = runSwitched(plan.Install.Side, opts.args(plan.Install.Side, fs)...)
+	}
+	if err != nil {
+		if len(plan.Restore) > 0 {
+			if rerr := runSteps(plan.Restore); rerr != nil {
+				warn("原来的模式没能重新启动：%v。可以手动运行 sidedoor start", rerr)
+			} else {
+				done("新模式没装成，已把原来的模式重新启动")
+			}
+		}
+		return err
+	}
+	if len(plan.Cleanup) > 0 {
+		if err := runSteps(plan.Cleanup); err != nil {
+			return fmt.Errorf("新模式已经装好，原来的模式也停了，但没能把它卸干净：%w。重新运行一次 sidedoor setup -mode %s 会接着清理", err, opts.mode)
+		}
+		done("原来的模式已卸掉，现在只装着 %s 模式", opts.mode)
+	}
+	return nil
+}
+
+// setupOptions 是 setup 的参数。mode 在调用 setupHere 之前已经定好。
+type setupOptions struct {
+	server, mode, domains, listen string
+}
+
+// args 拼出切换身份后运行的 setup 的参数：带上 -side 和定好的模式，用户显式给过的参数照传。
+func (o setupOptions) args(target side, fs *flag.FlagSet) []string {
+	args := []string{"setup", "-side", string(target), "-mode", o.mode}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name != "mode" && f.Name != "side" {
+			args = append(args, "-"+f.Name, f.Value.String())
+		}
+	})
+	return args
+}
+
+// setupHere 在当前身份这一边装 o.mode 模式：停掉这一边的旧服务、登录、选域名、保存并启动。
+// 失败或者被 Ctrl-C 打断时，把这一边原来的服务恢复回去。
+func setupHere(in *bufio.Reader, o setupOptions) error {
+	server, domains := &o.server, &o.domains
+	root := currentEUID() == 0
 	path := filepath.Join(configDir(root), "config.json")
 	prev, _ := loadConfig(path)
 	if prev == nil {
 		prev = &Config{}
 	}
 	// 重新配置时沿用状态接口的地址和密钥，登录过网页面板的不用重新填。
-	cfg := &Config{Listen: *listen, Mode: *mode, Dashboard: prev.Dashboard, APISecret: prev.APISecret, Overlay: prev.Overlay}
-	if prev.Listen == *listen {
+	cfg := &Config{Listen: o.listen, Mode: o.mode, Dashboard: prev.Dashboard, APISecret: prev.APISecret, Overlay: prev.Overlay}
+	if prev.Listen == o.listen {
 		cfg.API = prev.API
 	}
 	cfg.fillDefaults()
 
-	in := bufio.NewReader(os.Stdin)
 	s := &steps{total: 5}
 	var replaced atomic.Bool // 新服务装上之后，原来的服务就不用恢复了
-	fmt.Println("sidedoor setup：登录一次 VPN，然后装成后台服务。")
 
 	s.next("检查环境")
 	stopped := stopService(prev, path)
@@ -97,13 +175,6 @@ func cmdSetup(args []string) error {
 	}
 
 	s.next("选择模式")
-	if cfg.Mode == "" {
-		m, err := askMode(in, cfg.Listen, systemProxyOwner(cfg.Listen))
-		if err != nil {
-			return err
-		}
-		cfg.Mode = m
-	}
 	done("%s 模式", cfg.Mode)
 
 	s.next("登录 VPN 服务器")
@@ -211,10 +282,6 @@ func guardInterrupt(cleanup func()) (stop func()) {
 
 // nextSteps 按模式给出装好之后该做的事。
 func nextSteps(cfg *Config) []string {
-	sudo := ""
-	if cfg.Mode == ModeTUN {
-		sudo = "sudo "
-	}
 	var lines []string
 	switch cfg.Mode {
 	case ModeProxy:
@@ -227,9 +294,9 @@ func nextSteps(cfg *Config) []string {
 		lines = append(lines, fmt.Sprintf("用任意应用访问 %s 下的网站或服务试试", cfg.Domains[0]))
 	}
 	return append(lines,
-		sudo+"sidedoor status 查看隧道、流量和正在走 VPN 的连接",
-		sudo+"sidedoor dashboard 打开网页面板，看实时流量和每条连接",
-		fmt.Sprintf("暂停用 %ssidedoor stop，恢复用 %ssidedoor start", sudo, sudo))
+		"sidedoor status 查看隧道、流量和正在走 VPN 的连接",
+		"sidedoor dashboard 打开网页面板，看实时流量和每条连接",
+		"暂停用 sidedoor stop（撤掉代理，开机也不会自己连上），恢复用 sidedoor start；需要管理员权限时会在这里问你密码")
 }
 
 // reportTunnel 等后台服务连上隧道，再确认系统代理确实指向了它。
@@ -301,20 +368,13 @@ func askMode(in *bufio.Reader, listen, owner string) (string, error) {
 	for _, c := range []adapter.OpenConnectAuthFormChoice{
 		{Value: ModeProxy, Label: "proxy   只开本地代理 " + listen + "，不改任何系统设置；要在你自己的代理工具里把学校域名转发过来"},
 		{Value: ModeSystem, Label: "system  另外把系统代理指向它，浏览器直接生效；会修改系统代理设置，停止服务时自动还原"},
-		{Value: ModeTUN, Label: "tun     虚拟网卡，所有应用都生效；需要 sudo"},
+		{Value: ModeTUN, Label: "tun     虚拟网卡，所有应用都生效；要管理员权限，选了会在这里问你这台电脑的登录密码"},
 	} {
 		if modeUnsupported(c.Value) == "" {
 			choices = append(choices, c)
 		}
 	}
-	m, err := askChoice(in, "可选的模式（* 是推荐项）", choices, recommended)
-	if err != nil {
-		return "", err
-	}
-	if m == ModeTUN {
-		return "", errors.New("tun 模式要建虚拟网卡，需要 root：请改用 sudo sidedoor setup -mode tun")
-	}
-	return m, nil
+	return askChoice(in, "可选的模式（* 是推荐项）", choices, recommended)
 }
 
 // credentials 是从登录表单里认出来的用户名、密码和认证组。

@@ -132,3 +132,11 @@ func openBrowser(url string) error {
 	}
 	return exec.Command("xdg-open", url).Run()
 }
+
+// asUserCommand 让 root 以 uid / name 这个用户的身份运行 cmd。systemctl --user 要靠
+// XDG_RUNTIME_DIR 和会话总线找到这个用户的 systemd，sudo 默认会把它们清掉，所以显式带上。
+func asUserCommand(uid, name string, cmd []string) []string {
+	run := "/run/user/" + uid
+	return append([]string{"sudo", "-H", "-u", name, "env", "XDG_RUNTIME_DIR=" + run,
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=" + run + "/bus"}, cmd...)
+}

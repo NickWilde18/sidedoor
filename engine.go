@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -263,7 +265,29 @@ type runtimeStatus struct {
 	DNS     []string     `json:"dns,omitempty"`
 	Since   time.Time    `json:"since,omitzero"`
 	Traffic trafficStats `json:"traffic"`
-	Updated time.Time    `json:"updated"`
+	// VPN 是当前走 VPN 的连接里传输量最大的几条，VPNCount 是走 VPN 的连接总数。状态接口要密钥，
+	// tun 模式的密钥只有 root 能读，所以由后台服务写在这里，普通用户的 status 照样看得到。
+	VPN      []apiConnection `json:"vpn,omitempty"`
+	VPNCount int             `json:"vpn_count"`
+	Updated  time.Time       `json:"updated"`
+}
+
+// statusConnections 是 status.json 里最多记几条走 VPN 的连接。
+const statusConnections = 10
+
+// vpnConnections 从全部连接里挑出走 VPN 的，按传输量从大到小取前 statusConnections 条，
+// 同时返回走 VPN 的总数。
+func vpnConnections(conns []apiConnection) ([]apiConnection, int) {
+	var vpn []apiConnection
+	for _, c := range conns {
+		if slices.Contains(c.Chains, "vpn") {
+			vpn = append(vpn, c)
+		}
+	}
+	slices.SortFunc(vpn, func(a, b apiConnection) int {
+		return cmp.Compare(b.Upload+b.Download, a.Upload+a.Download)
+	})
+	return vpn[:min(len(vpn), statusConnections)], len(vpn)
 }
 
 // statsInterval 是流量的刷新间隔，速率也按这个间隔算。测试里会调短。
@@ -368,6 +392,10 @@ func runEngine(ctx context.Context, cfg *Config, cfgPath, password string, verbo
 		}
 		rs.Started = started
 		rs.Traffic = counted.snapshot().ratesFrom(rated)
+		// 刚启动时状态接口可能还没开起来，取不到这一轮就不写连接。
+		if conns, err := fetchConnections(cfg); err == nil {
+			rs.VPN, rs.VPNCount = vpnConnections(conns)
+		}
 		if err := writeStatus(path, rs); err != nil {
 			log.Printf("写状态文件失败: %v", err)
 		}

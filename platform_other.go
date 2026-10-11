@@ -39,3 +39,8 @@ func systemProxySettings() (map[string]string, bool) { return nil, false }
 func openBrowser(string) error { return errors.New("不支持") }
 
 func processAlive(int) bool { return true }
+
+// asUserCommand 让 root 以 name 这个用户的身份运行 cmd。
+func asUserCommand(_, name string, cmd []string) []string {
+	return append([]string{"sudo", "-H", "-u", name}, cmd...)
+}

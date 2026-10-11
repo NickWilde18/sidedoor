@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -117,12 +118,15 @@ func writeOverlayFiles(cfgPath string, cfg *Config) ([]overlayFile, error) {
 }
 
 // cmdOverlay 写出叠加层文件。第一次运行时先在配置里打开叠加层专用端口，并重启后台服务。
-func cmdOverlay() error {
-	path, cfg, err := findConfig()
-	if err != nil {
+func cmdOverlay(args []string) error {
+	fs := flag.NewFlagSet("overlay", flag.ExitOnError)
+	only := sideFlag(fs)
+	_ = fs.Parse(args)
+	if switched, err := switchIfNeeded(*only); switched || err != nil {
 		return err
 	}
-	if err := requireRoot(cfg); err != nil {
+	path, cfg, err := loadSide(ownSide())
+	if err != nil {
 		return err
 	}
 	s := &steps{total: 2}
