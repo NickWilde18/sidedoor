@@ -13,9 +13,13 @@ PATCHES := $(wildcard patches/*.patch)
 BUILD := .build
 MODFILE := $(BUILD)/go.mod
 
-FLAGS := -tags $(TAGS) -modfile $(MODFILE) -trimpath -ldflags "-s -w"
+# 发布版的版本号，写进二进制，sidedoor version 显示它：make VERSION=v1.0.0 dist。
+# 自己编译时留空，sidedoor version 改为显示提交号。
+VERSION ?=
 
-.PHONY: build install test linux linux-test check-singbox
+FLAGS := -tags $(TAGS) -modfile $(MODFILE) -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
+
+.PHONY: build install test linux linux-test dist check-singbox
 
 build: $(MODFILE)
 	go build $(FLAGS) -o sidedoor .
@@ -31,6 +35,13 @@ linux: $(MODFILE)
 	@mkdir -p dist
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(FLAGS) -o dist/sidedoor-linux-amd64 .
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build $(FLAGS) -o dist/sidedoor-linux-arm64 .
+
+# dist 编出发布用的单个二进制 dist/sidedoor-<系统>-<架构>，系统和架构跟着 GOOS、GOARCH 走。
+# 发布由 .github/workflows/release.yml 在推 v* 标签时调用它；macOS 版要开 cgo（sing-box 读系统
+# 根证书和系统 DNS 配置靠它），所以在 macOS 上编。
+dist: $(MODFILE)
+	@mkdir -p dist
+	go build $(FLAGS) -o dist/sidedoor-$$(go env GOOS)-$$(go env GOARCH) .
 
 # Linux 上的测试也编成二进制，拷过去跑：./sidedoor-linux-amd64.test -test.v
 # tun 模式的测试要 root：sudo ./sidedoor-linux-amd64.test -test.run TestTunLinux -test.v
