@@ -6,6 +6,28 @@
 
 ## 安装
 
+### 下载发布版
+
+[Releases](https://github.com/NickWilde18/sidedoor/releases) 里有编好的二进制：`sidedoor-darwin-arm64`（Apple 芯片的 Mac）、`sidedoor-darwin-amd64`（Intel Mac）、`sidedoor-linux-amd64`、`sidedoor-linux-arm64`，`SHA256SUMS` 是它们的校验和。仓库是私有的，用 gh 下载最省事：
+
+```sh
+gh release download -R NickWilde18/sidedoor -p sidedoor-darwin-arm64 -p SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing
+sudo install -m 755 sidedoor-darwin-arm64 /usr/local/bin/sidedoor
+sidedoor version
+```
+
+要用 tun 模式的话，程序要放在只有 root 能改的地方，比如上面的 `/usr/local/bin`，原因见下面 Linux 一节。二进制没有经过苹果签名：用 gh 或 curl 下载的可以直接运行；用浏览器下载的会被系统拦住，先运行 `xattr -d com.apple.quarantine sidedoor-darwin-arm64` 再装。
+
+发新版：把发布说明写进带注释的标签再推上去，`.github/workflows/release.yml` 会编好四个二进制并建 Release。
+
+```sh
+git tag -a v1.0.1 -F 发布说明.md
+git push origin v1.0.1
+```
+
+### 自己编译
+
 需要 Go 1.27 或更新的版本，但只在编译时需要。编译出来的二进制只依赖系统自带的库。
 
 ```sh
@@ -39,6 +61,7 @@ sidedoor start       # 按已有的配置连上，不用重新 setup
 sidedoor restart     # stop 再 start
 sidedoor uninstall   # stop，再删掉全部配置和保存的密码
 sidedoor debug goroutines   # 连接挂着不放时，导出后台服务所有 goroutine 的栈，不用重启它
+sidedoor version     # 版本号；自己编译的显示提交号
 ```
 
 输出到终端时带颜色，输出到管道或文件时不带；不想要颜色可以设 `NO_COLOR=1`。

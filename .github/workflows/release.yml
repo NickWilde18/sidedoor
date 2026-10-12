@@ -1,0 +1,75 @@
+# 发布：推 v* 标签时编出四个二进制，建 GitHub Release 并上传。PR 上只跑测试和编译，不发布，
+# 合并前就能看出发布那天会不会编不过。
+#
+# macOS 版要开 cgo（sing-box 读系统根证书和系统 DNS 配置靠它），只能在 macOS 上编；Intel 版在
+# Apple 芯片的 runner 上用 clang -arch x86_64 交叉编。Linux 版和 make linux 一样关掉 cgo。
+# 发布说明取自标签的注释：git tag -a v1.0.0 -F 说明.md。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, goos: darwin, goarch: arm64, cgo: "1", cc: clang, test: true }
+          - { runner: macos-latest, goos: darwin, goarch: amd64, cgo: "1", cc: "clang -arch x86_64", test: false }
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cgo: "0", cc: "", test: true }
+          - { runner: ubuntu-latest, goos: linux, goarch: arm64, cgo: "0", cc: "", test: false }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: 测试
+        if: matrix.test
+        run: make test
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+          CC: ${{ matrix.cc }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: make dist VERSION="$VERSION"
+      - name: 确认版本号写进去了
+        if: matrix.goarch == 'arm64' && matrix.goos == 'darwin' || matrix.goarch == 'amd64' && matrix.goos == 'linux'
+        run: ./dist/sidedoor-${{ matrix.goos }}-${{ matrix.goarch }} version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidedoor-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/sidedoor-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # actions/checkout 拉下来的标签是轻量化的引用，要重新取一次才拿得到标签注释。
+      - name: 取标签注释
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 校验和
+        run: cd dist && chmod +x sidedoor-* && sha256sum sidedoor-* > SHA256SUMS && cat SHA256SUMS
+      - name: 建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "sidedoor $GITHUB_REF_NAME" --notes-from-tag --verify-tag
